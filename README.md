@@ -1,0 +1,139 @@
+# ghostty-profiles
+
+A small terminal UI for [Ghostty](https://ghostty.org) that lets you browse themes
+and save, switch and tweak complete **looks** (profiles): colors, fonts, cursor,
+opacity and blur, a background image and custom shaders. Edits apply to your
+running Ghostty as you make them (hot reload).
+
+Written in Rust with [ratatui](https://ratatui.rs). Two names for one program:
+`ghostty-profiles` and the short `gpf`.
+
+## Install
+
+```sh
+cargo install --git https://github.com/evanspn/ghostty-profiles
+```
+
+You need a Rust toolchain (1.88 or newer). No Ghostty files are needed at build time:
+the 463 built-in Ghostty themes and the presets are compiled into the binary.
+
+## Quick start
+
+```sh
+gpf                      # open the TUI (installs the presets on first run)
+gpf list                 # list profiles, ● marks the active one
+gpf apply shd            # make a profile the active look and reload Ghostty
+gpf adopt mine           # turn your current Ghostty look into a profile
+```
+
+The first `apply` adds **one** line to your Ghostty config (a backup is kept):
+
+```
+config-file = ?ghostty-profiles-active.conf
+```
+
+Everything else lives in `~/.config/ghostty-profiles/`. `gpf unlink` removes that line again.
+
+## The TUI
+
+| Tab | What it does |
+| --- | --- |
+| **Profiles** | Your profiles with a live preview. `Enter` applies one. |
+| **Themes** | All themes with a filter (`/`) and color swatches. `Enter` bakes the theme's colors into the current profile. |
+| **Edit** | Colors (including the 16 ANSI colors, hex-validated, with swatches), font family/size/thickness/features, cell adjustments, cursor, opacity/blur/padding, background image path/opacity/fit/position. |
+| **Shaders** | The bundled shader library plus the profile's own. `Enter` toggles, `a` toggles animation. |
+
+Keys: `Tab`/`Shift-Tab` or `1`-`4` switch tabs, `↑↓` move, `n` new profile (a copy of the selected
+one), `d` delete (asks for `y`), `e` export, `p` install presets, `ctrl+r` force reload, `q` quit.
+In Edit: `Enter` edits (or cycles a choice), `←→` cycle choices, `x` unsets the value.
+
+Every valid edit is **autosaved** to the profile, the active config is re-rendered, and Ghostty
+is reloaded after a short (250 ms) pause so a burst of edits causes one reload. Invalid values
+(a bad hex color, an opacity of 3) are refused with a message and change nothing.
+
+## Profiles
+
+A profile is a folder:
+
+```
+~/.config/ghostty-profiles/profiles/shd/
+├── profile.conf      native Ghostty `key = value` syntax, plus a `# description:` comment
+├── shaders/          shader files this profile uses
+└── images/           background images (only if you add one)
+```
+
+`profile.conf` is plain Ghostty config, so anything Ghostty accepts works, and comments and key
+order are preserved when the tool edits it. Asset paths inside it are **relative**
+(`custom-shader = shaders/xmb-waves.glsl`); when applied, they are written as absolute paths
+into the generated `~/.config/ghostty/ghostty-profiles-active.conf`, which is what Ghostty loads.
+
+### Presets
+
+`gpf install-presets` (also done on first run) installs four profiles, none with a background image:
+
+- **shd** — ember orange on charcoal with glass blur and a flowing wave shader
+- **calm-dark** — quiet blue-grey, nearly opaque, soft vignette
+- **crt-green** — phosphor green with scanlines and a faint flicker
+- **aurora-glass** — translucent deep blue with a slow aurora glow
+
+Shader library: `xmb-waves`, `crt-scanlines`, `aurora`, `soft-glow`. They are written to leave text legible.
+
+### Sharing and your own images
+
+```sh
+gpf export shd ./shd            # portable folder; background images are LEFT OUT
+gpf export shd ./shd --with-images
+gpf import ./shd --name shd2
+```
+
+**Privacy default:** `export` never includes background images unless you pass `--with-images`, and
+shaders are copied in so an export is self-contained. The presets in this repository ship without any
+image, and `.gitignore` excludes common image formats so a wallpaper cannot be committed by accident.
+`import` refuses profiles whose asset paths point outside their own folder.
+
+### Adopting your current setup
+
+`gpf adopt NAME` moves the *appearance* settings (colors, fonts, cursor, opacity, shaders, images…)
+out of your Ghostty config into a new profile and leaves everything else (keybinds, shell settings)
+where it is. Referenced shaders and images are copied into the profile, the originals are not touched,
+and your config files are backed up once as `*.bak-pre-ghostty-profiles`. Adopting does not apply anything.
+
+## Commands
+
+```
+gpf [list | apply NAME | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
+     | import PATH [--name N] | install-presets [--force] | reload | status | unlink]
+```
+
+`gpf status` (alias `doctor`) shows where things are, whether Ghostty is running and whether
+`ghostty +validate-config` is happy.
+
+## Hot reload
+
+Ghostty reloads its config when it receives `SIGUSR2`; `ghostty-profiles` sends that to running
+`ghostty` processes (`pgrep -x ghostty`). If Ghostty isn't found, press `ctrl+shift+r` inside it.
+To use another mechanism, set `GHOSTTY_PROFILES_RELOAD_CMD` to a shell command that is run instead.
+
+## Caveats
+
+- Ghostty shows **no error** when a custom shader fails to compile; the window just looks unchanged. The
+  bundled shaders are compile-checked in this repo's tests, but your own shaders are on you.
+- Config location is `$XDG_CONFIG_HOME` or `~/.config`. The macOS `~/Library/Application Support`
+  location is not managed.
+- The Edit tab covers the common appearance settings. Anything else can be added by hand in
+  `profile.conf`; it is preserved.
+- Themes are baked into a profile as plain colors (a copy, not a reference to the theme).
+
+## Development
+
+```sh
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt
+```
+
+Tests run in a temporary config home and never touch your real `~/.config` or signal a running Ghostty.
+
+## License
+
+MIT. The bundled themes come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (MIT); see `themes/README.md`.

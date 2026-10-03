@@ -1,0 +1,363 @@
+//! Drawing. Pure functions of [`App`]; nothing here changes state.
+
+use ratatui::Frame;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+
+use super::app::{App, Tab};
+use super::fields::Kind;
+use crate::ghostty::{ThemeColors, theme_colors};
+use crate::profile::{Profile, hex_rgb};
+
+const ACCENT: Color = Color::Yellow;
+
+fn rgb(hex: &str) -> Option<Color> {
+    hex_rgb(hex).map(|(r, g, b)| Color::Rgb(r, g, b))
+}
+
+fn dim() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn swatch(hex: Option<&str>) -> Span<'static> {
+    match hex.and_then(rgb) {
+        Some(c) => Span::styled("██", Style::default().fg(c)),
+        None => Span::styled("··", dim()),
+    }
+}
+
+/// The colors a preview paints with, from either a profile or a theme.
+struct Colors {
+    background: Option<String>,
+    foreground: Option<String>,
+    cursor: Option<String>,
+    selection_bg: Option<String>,
+    selection_fg: Option<String>,
+    palette: [Option<String>; 16],
+}
+
+impl Colors {
+    fn from_profile(p: &Profile) -> Self {
+        let pal = p.palette();
+        Colors {
+            background: p.color("background"),
+            foreground: p.color("foreground"),
+            cursor: p.color("cursor-color"),
+            selection_bg: p.color("selection-background"),
+            selection_fg: p.color("selection-foreground"),
+            palette: std::array::from_fn(|i| pal.get(&(i as u8)).cloned()),
+        }
+    }
+
+    fn from_theme(c: &ThemeColors) -> Self {
+        Colors {
+            background: c.background.clone(),
+            foreground: c.foreground.clone(),
+            cursor: c.cursor_color.clone(),
+            selection_bg: c.selection_background.clone(),
+            selection_fg: c.selection_foreground.clone(),
+            palette: std::array::from_fn(|i| c.palette.get(&(i as u8)).cloned()),
+        }
+    }
+}
+
+fn preview(f: &mut Frame, area: Rect, title: &str, c: &Colors, extra: Vec<Line<'static>>) {
+    let block = Block::default().borders(Borders::ALL).title(format!(" {title} "));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::raw("bg "),
+        swatch(c.background.as_deref()),
+        Span::raw("  fg "),
+        swatch(c.foreground.as_deref()),
+        Span::raw("  cursor "),
+        swatch(c.cursor.as_deref()),
+        Span::raw("  selection "),
+        swatch(c.selection_bg.as_deref()),
+    ])];
+    for row in 0..2 {
+        let mut spans = vec![Span::raw(if row == 0 { "ansi  " } else { "bright" })];
+        for i in 0..8 {
+            spans.push(Span::raw(" "));
+            spans.push(swatch(c.palette[row * 8 + i].as_deref()));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::raw(""));
+    lines.extend(extra);
+
+    let head_h = lines.len() as u16;
+    let [top, sample] =
+        Layout::vertical([Constraint::Length(head_h.min(inner.height)), Constraint::Min(0)]).areas(inner);
+    f.render_widget(Paragraph::new(lines), top);
+
+    // a miniature terminal painted with the colors
+    let base = Style::default().bg(c.background.as_deref().and_then(rgb).unwrap_or(Color::Reset)).fg(c
+        .foreground
+        .as_deref()
+        .and_then(rgb)
+        .unwrap_or(Color::Reset));
+    let pal = |i: usize| c.palette[i].as_deref().and_then(rgb).map(|col| base.fg(col)).unwrap_or(base);
+    let sel = Style::default().bg(c.selection_bg.as_deref().and_then(rgb).unwrap_or(Color::Reset)).fg(c
+        .selection_fg
+        .as_deref()
+        .and_then(rgb)
+        .unwrap_or(Color::Reset));
+    let cur = Style::default().bg(c.cursor.as_deref().and_then(rgb).unwrap_or(Color::Reset));
+    let term = vec![
+        Line::from(vec![
+            Span::styled("~/code ", pal(4)),
+            Span::styled("main ", pal(5)),
+            Span::styled("$ ", pal(2)),
+            Span::styled("cargo test", base),
+        ]),
+        Line::from(vec![Span::styled("   Compiling ", pal(2)), Span::styled("ghostty-profiles", base)]),
+        Line::from(vec![Span::styled("warning: ", pal(3)), Span::styled("unused variable", base)]),
+        Line::from(vec![Span::styled("error[E0382]: ", pal(1)), Span::styled("borrow of moved value", base)]),
+        Line::from(vec![
+            Span::styled(" selected text ", sel),
+            Span::styled(" bold ", base.add_modifier(Modifier::BOLD)),
+            Span::styled(" dim ", pal(8)),
+        ]),
+        Line::from(vec![Span::styled("$ ", pal(2)), Span::styled(" ", cur)]),
+    ];
+    f.render_widget(Paragraph::new(term).style(base), sample);
+}
+
+pub fn draw(f: &mut Frame, app: &App) {
+    let [tabs, body, footer] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)]).areas(f.area());
+
+    let titles: Vec<Line> =
+        Tab::ALL.iter().enumerate().map(|(i, t)| Line::from(format!(" {} {} ", i + 1, t.title()))).collect();
+    let selected = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
+    f.render_widget(
+        Tabs::new(titles)
+            .select(selected)
+            .block(Block::default().borders(Borders::ALL).title(" ghostty-profiles "))
+            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        tabs,
+    );
+
+    match app.tab {
+        Tab::Profiles => draw_profiles(f, body, app),
+        Tab::Themes => draw_themes(f, body, app),
+        Tab::Edit => draw_edit(f, body, app),
+        Tab::Shaders => draw_shaders(f, body, app),
+    }
+    draw_footer(f, footer, app);
+    if app.input.is_some() {
+        draw_input(f, app);
+    }
+}
+
+fn halves(area: Rect) -> [Rect; 2] {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .areas(area)
+}
+
+fn list_block(title: &str) -> Block<'static> {
+    Block::default().borders(Borders::ALL).title(format!(" {title} "))
+}
+
+fn highlight() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
+
+fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
+    let [left, right] = halves(area);
+    let items: Vec<ListItem> = app
+        .profiles
+        .iter()
+        .map(|n| {
+            let active = app.active.as_deref() == Some(n.as_str());
+            ListItem::new(Line::from(vec![
+                Span::styled(if active { "● " } else { "  " }, Style::default().fg(ACCENT)),
+                Span::raw(n.clone()),
+            ]))
+        })
+        .collect();
+    let mut st = ListState::default().with_selected((!app.profiles.is_empty()).then_some(app.sel));
+    f.render_stateful_widget(
+        List::new(items).block(list_block("Profiles (● = active)")).highlight_style(highlight()),
+        left,
+        &mut st,
+    );
+
+    match &app.profile {
+        Some(p) => {
+            let mut extra = vec![Line::styled(p.description(), dim())];
+            let shaders = p.shaders();
+            extra.push(Line::from(format!(
+                "shader: {}",
+                if shaders.is_empty() { "none".to_string() } else { shaders.join(", ") }
+            )));
+            extra.push(Line::from(format!("background image: {}", if p.image().is_some() { "yes" } else { "no" })));
+            extra.push(Line::raw(""));
+            preview(f, right, &p.name, &Colors::from_profile(p), extra);
+        }
+        None => f.render_widget(
+            Paragraph::new("No profiles yet. Press p to install the presets, or n to create one.")
+                .block(list_block("Preview"))
+                .wrap(Wrap { trim: true }),
+            right,
+        ),
+    }
+}
+
+fn draw_themes(f: &mut Frame, area: Rect, app: &App) {
+    let [left, right] = halves(area);
+    let items: Vec<ListItem> = app
+        .theme_view
+        .iter()
+        .filter_map(|i| app.themes.get(*i))
+        .map(|t| ListItem::new(if t.user { format!("{} (yours)", t.name) } else { t.name.clone() }))
+        .collect();
+    let title = if app.theme_filter.is_empty() {
+        format!("Themes ({})  / filter", app.theme_view.len())
+    } else {
+        format!("Themes ({})  filter: {}", app.theme_view.len(), app.theme_filter)
+    };
+    let mut st = ListState::default().with_selected((!app.theme_view.is_empty()).then_some(app.theme_sel));
+    f.render_stateful_widget(List::new(items).block(list_block(&title)).highlight_style(highlight()), left, &mut st);
+
+    match app.selected_theme() {
+        Some(t) => {
+            let target = app.profile.as_ref().map(|p| p.name.as_str()).unwrap_or("no profile");
+            let extra = vec![Line::styled(format!("Enter bakes these colors into '{target}'"), dim()), Line::raw("")];
+            preview(f, right, &t.name, &Colors::from_theme(&theme_colors(&t.text)), extra);
+        }
+        None => f.render_widget(Paragraph::new("No theme matches the filter.").block(list_block("Preview")), right),
+    }
+}
+
+fn draw_edit(f: &mut Frame, area: Rect, app: &App) {
+    let [left, right] = halves(area);
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_row = 0;
+    let mut group = "";
+    for (i, fld) in app.fields.iter().enumerate() {
+        if fld.group != group {
+            group = fld.group;
+            items.push(ListItem::new(Line::styled(format!("── {group}"), dim())));
+        }
+        if i == app.field_sel {
+            selected_row = items.len();
+        }
+        let value = app.field_value(i);
+        let mut spans = vec![Span::raw(format!("  {:<15} ", fld.label))];
+        match &value {
+            Some(v) => spans.push(Span::raw(v.clone())),
+            None => spans.push(Span::styled("—", dim())),
+        }
+        if matches!(fld.kind, Kind::Hex | Kind::Palette(_)) {
+            spans.push(Span::raw(" "));
+            spans.push(swatch(value.as_deref()));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    let name = app.profile.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "no profile".into());
+    let mut st = ListState::default().with_selected(Some(selected_row));
+    f.render_stateful_widget(
+        List::new(items).block(list_block(&format!("Edit '{name}'"))).highlight_style(highlight()),
+        left,
+        &mut st,
+    );
+
+    match &app.profile {
+        Some(p) => {
+            let extra = vec![
+                Line::styled("Enter edits · ←/→ cycles choices · x unsets · every change saves and reloads", dim()),
+                Line::raw(""),
+            ];
+            preview(f, right, "Live preview", &Colors::from_profile(p), extra);
+        }
+        None => f.render_widget(
+            Paragraph::new("Select a profile on the Profiles tab first.").block(list_block("Preview")),
+            right,
+        ),
+    }
+}
+
+fn draw_shaders(f: &mut Frame, area: Rect, app: &App) {
+    let [left, right] = halves(area);
+    let items: Vec<ListItem> = app
+        .shader_rows
+        .iter()
+        .map(|r| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if r.enabled { "[x] " } else { "[ ] " },
+                    Style::default().fg(if r.enabled { ACCENT } else { Color::Reset }),
+                ),
+                Span::raw(r.name.clone()),
+                Span::styled(if r.in_library { "" } else { "  (this profile)" }, dim()),
+            ]))
+        })
+        .collect();
+    let mut st = ListState::default().with_selected((!app.shader_rows.is_empty()).then_some(app.shader_sel));
+    f.render_stateful_widget(List::new(items).block(list_block("Shaders")).highlight_style(highlight()), left, &mut st);
+
+    let anim = app.profile.as_ref().and_then(|p| p.get("custom-shader-animation")).unwrap_or_else(|| "unset".into());
+    let text = vec![
+        Line::from("Enter / space toggles the shader for this profile."),
+        Line::from("a toggles animation (custom-shader-animation)."),
+        Line::raw(""),
+        Line::from(format!("animation: {anim}")),
+        Line::raw(""),
+        Line::styled("Shaders are copied into the profile folder, so exports stay self-contained.", dim()),
+        Line::styled(
+            "Shader compile errors are not shown by Ghostty: if the window looks unchanged, the shader may have failed.",
+            dim(),
+        ),
+    ];
+    f.render_widget(Paragraph::new(text).block(list_block("About")).wrap(Wrap { trim: true }), right);
+}
+
+fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
+    let color = if app.status.ok { Color::Green } else { Color::Red };
+    let help = match app.tab {
+        Tab::Profiles => {
+            "↑↓ select · Enter apply · n new · d delete · e export · p presets · Tab next · ctrl+r reload · q quit"
+        }
+        Tab::Themes => "↑↓ select · / filter · Enter bake into profile · Esc clear · Tab next · q quit",
+        Tab::Edit => "↑↓ select · Enter edit · ←→ cycle · x unset · Tab next · ctrl+r reload · q quit",
+        Tab::Shaders => "↑↓ select · Enter toggle · a animation · Tab next · q quit",
+    };
+    let text = vec![Line::styled(app.status.text.clone(), Style::default().fg(color)), Line::styled(help, dim())];
+    f.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::TOP)), area);
+}
+
+fn draw_input(f: &mut Frame, app: &App) {
+    let Some(input) = &app.input else { return };
+    let area = f.area();
+    let w = area.width.saturating_sub(4).min(72);
+    let h = 5.min(area.height);
+    let r = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + area.height.saturating_sub(h + 4),
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, r);
+    let mut lines =
+        vec![Line::from(vec![Span::raw(input.buf.clone()), Span::styled("▏", Style::default().fg(ACCENT))])];
+    match &input.error {
+        Some(e) => lines.push(Line::styled(e.clone(), Style::default().fg(Color::Red))),
+        None => lines.push(Line::styled("Enter to confirm · Esc to cancel", dim())),
+    }
+    f.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Left).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", input.title))
+                .border_style(Style::default().fg(ACCENT)),
+        ),
+        r,
+    );
+}

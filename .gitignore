@@ -1,0 +1,13 @@
+/target
+# Images can never be committed by accident: profiles keep personal wallpapers
+# in their own folder, and this repo ships none.
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.heic
+*.avif
+*.bmp
+*.tiff
+.DS_Store
