@@ -25,6 +25,8 @@ pub const MAX_PARAMS: usize = 16;
 pub const MAX_PRESETS: usize = 16;
 const BEGIN: &str = "// ==== ghostty-profiles parameters (generated from the profile's .params file; do not edit) ====";
 const END: &str = "// ==== end of generated parameters ====";
+const FOOTER_BEGIN: &str = "// ==== ghostty-profiles opacity wrapper (generated; do not edit) ====";
+const FOOTER_END: &str = "// ==== end of opacity wrapper ====";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
@@ -48,11 +50,50 @@ pub struct Preset {
     pub values: Vec<(String, String)>,
 }
 
+/// The direction a shader's effect is meant to move, ON SCREEN as the user sees it.
+/// (Ghostty's `fragCoord` has its origin at the top-left with y pointing DOWN, so "down" is +y.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Motion {
+    Down,
+    Up,
+    Left,
+    Right,
+    Radial,
+    None,
+}
+
+impl Motion {
+    pub fn name(self) -> &'static str {
+        match self {
+            Motion::Down => "down",
+            Motion::Up => "up",
+            Motion::Left => "left",
+            Motion::Right => "right",
+            Motion::Radial => "radial",
+            Motion::None => "none",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Motion> {
+        [Motion::Down, Motion::Up, Motion::Left, Motion::Right, Motion::Radial, Motion::None]
+            .into_iter()
+            .find(|m| m.name() == s)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Schema {
     pub params: Vec<Param>,
     pub presets: Vec<Preset>,
+    /// `// @motion down|up|left|right|radial|none`: the declared direction of the effect.
+    pub motion: Option<Motion>,
+    /// `// @coverage full`: the effect is meant to span the screen (waves, ribbons), so it is exempt from the
+    /// "does not block the screen" budget that particle effects must meet.
+    pub coverage_full: bool,
 }
+
+/// The name of the universal parameter that scales how strongly the effect shows (never the terminal's text).
+pub const OPACITY: &str = "opacity";
 
 fn valid_name(n: &str) -> bool {
     let mut c = n.chars();
@@ -162,6 +203,19 @@ pub fn parse_schema(src: &str) -> Result<Schema, String> {
                     default: format_number(def),
                 });
             }
+            "@motion" => {
+                let word = args.trim();
+                schema.motion =
+                    Some(Motion::parse(word).ok_or_else(|| {
+                        err(format!("unknown motion '{word}' (down, up, left, right, radial, none)"))
+                    })?);
+            }
+            "@coverage" => {
+                if args.trim() != "full" {
+                    return Err(err(format!("unknown coverage '{}' (the only value is: full)", args.trim())));
+                }
+                schema.coverage_full = true;
+            }
             "@preset" => {
                 let mut toks = args.split_whitespace();
                 let Some(name) = toks.next() else { return Err(err("expected: @preset NAME key=value ...".into())) };
@@ -269,8 +323,73 @@ fn glsl_float(n: f64) -> String {
     format!("{n:.6}")
 }
 
+/// What a shader's header needs to know about the profile it is rendered for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderContext {
+    /// Multiplies the shader's own `opacity` (the profile-wide effects opacity), 0..1.
+    pub opacity_scale: f64,
+    /// The terminal's background color: what a pixel with nothing drawn on it looks like.
+    pub background: (u8, u8, u8),
+    /// The profile has a background image, so the background is a picture, not one flat color.
+    pub background_image: bool,
+}
+
+/// Ghostty's default background (`#282c34`), for a profile that sets none.
+pub const DEFAULT_BACKGROUND: (u8, u8, u8) = (0x28, 0x2c, 0x34);
+
+impl Default for RenderContext {
+    fn default() -> Self {
+        RenderContext { opacity_scale: 1.0, background: DEFAULT_BACKGROUND, background_image: false }
+    }
+}
+
+/// The text mask every effect uses to stay BEHIND the text. It is 1.0 where the terminal drew anything that
+/// is not plain background (text of any color, the cursor, a selection, inverse video) and on a thin fringe
+/// next to it, one to two pixels wide (so anti-aliased edges are covered), and 0.0 on plain background. The only neighbour reads are
+/// twelve taps within 2 px (the 8 neighbours, and 4 axial ones 2 px out) and they feed the mask alone: a color is never blended with its neighbours.
+/// With a background image the background is not one color, so a pixel is compared with a local estimate of
+/// the picture taken from four wide taps instead.
+const MASK_GLSL: &str = "\
+float gp_dist(vec3 a, vec3 b) { vec3 d = abs(a - b); return max(max(d.r, d.g), d.b); }
+float gp_isInk(vec4 c, vec3 ref) {
+    // far from the background (either as is, or premultiplied by the window's opacity)
+    return min(gp_dist(c.rgb, ref), gp_dist(c.rgb, ref * c.a));
+}
+float gp_textMask(vec2 fragCoord, vec4 term) {
+    vec2 px = 1.0 / iResolution.xy;
+    vec2 uv = fragCoord * px;
+    // taps on pixel centres: the 8 neighbours at 1 px and the 4 axial ones at 2 px, so a 1-2 px fringe is covered
+    vec4 a0 = texture(iChannel0, uv + vec2( 1.0,  0.0) * px);
+    vec4 a1 = texture(iChannel0, uv + vec2(-1.0,  0.0) * px);
+    vec4 a2 = texture(iChannel0, uv + vec2( 0.0,  1.0) * px);
+    vec4 a3 = texture(iChannel0, uv + vec2( 0.0, -1.0) * px);
+    vec4 a4 = texture(iChannel0, uv + vec2( 1.0,  1.0) * px);
+    vec4 a5 = texture(iChannel0, uv + vec2(-1.0,  1.0) * px);
+    vec4 a6 = texture(iChannel0, uv + vec2( 1.0, -1.0) * px);
+    vec4 a7 = texture(iChannel0, uv + vec2(-1.0, -1.0) * px);
+    vec4 b0 = texture(iChannel0, uv + vec2( 2.0,  0.0) * px);
+    vec4 b1 = texture(iChannel0, uv + vec2(-2.0,  0.0) * px);
+    vec4 b2 = texture(iChannel0, uv + vec2( 0.0,  2.0) * px);
+    vec4 b3 = texture(iChannel0, uv + vec2( 0.0, -2.0) * px);
+    if (P_bg_image > 0.5) {
+        // a picture behind the text: compare with a local estimate of the picture from four wide taps
+        vec3 ref = 0.25 * (texture(iChannel0, uv + vec2( 14.0, 0.0) * px).rgb + texture(iChannel0, uv + vec2(-14.0, 0.0) * px).rgb
+                         + texture(iChannel0, uv + vec2(0.0,  14.0) * px).rgb + texture(iChannel0, uv + vec2(0.0, -14.0) * px).rgb);
+        float d = gp_dist(term.rgb, ref);
+        d = max(d, max(max(gp_dist(a0.rgb, ref), gp_dist(a1.rgb, ref)), max(gp_dist(a2.rgb, ref), gp_dist(a3.rgb, ref))));
+        d = max(d, max(max(gp_dist(a4.rgb, ref), gp_dist(a5.rgb, ref)), max(gp_dist(a6.rgb, ref), gp_dist(a7.rgb, ref))));
+        d = max(d, max(max(gp_dist(b0.rgb, ref), gp_dist(b1.rgb, ref)), max(gp_dist(b2.rgb, ref), gp_dist(b3.rgb, ref))));
+        return smoothstep(0.08, 0.16, d);
+    }
+    float d = max(gp_isInk(term, P_bg), max(max(gp_isInk(a0, P_bg), gp_isInk(a1, P_bg)), max(gp_isInk(a2, P_bg), gp_isInk(a3, P_bg))));
+    d = max(d, max(max(gp_isInk(a4, P_bg), gp_isInk(a5, P_bg)), max(gp_isInk(a6, P_bg), gp_isInk(a7, P_bg))));
+    d = max(d, max(max(gp_isInk(b0, P_bg), gp_isInk(b1, P_bg)), max(gp_isInk(b2, P_bg), gp_isInk(b3, P_bg))));
+    return smoothstep(0.02, 0.06, d);
+}
+";
+
 /// The generated header: `const` declarations built only from parsed numbers.
-pub fn header(schema: &Schema, resolved: &[String]) -> String {
+pub fn header(schema: &Schema, resolved: &[String], ctx: &RenderContext) -> String {
     let mut out = format!("{BEGIN}\n");
     for (p, v) in schema.params.iter().zip(resolved) {
         match p.kind {
@@ -285,33 +404,83 @@ pub fn header(schema: &Schema, resolved: &[String]) -> String {
             }
         }
     }
+    let f = |c: u8| glsl_float(c as f64 / 255.0);
+    out.push_str(&format!(
+        "const vec3 P_bg = vec3({}, {}, {});\n",
+        f(ctx.background.0),
+        f(ctx.background.1),
+        f(ctx.background.2)
+    ));
+    out.push_str(&format!("const float P_bg_image = {};\n", if ctx.background_image { "1.0" } else { "0.0" }));
+    out.push_str(MASK_GLSL);
+    if has_opacity(schema) {
+        // the shader's own mainImage becomes gp_effect; the generated footer wraps it (see `render`)
+        out.push_str("#define mainImage gp_effect\n");
+    }
+    out.push_str(
+        "// Ghostty's fragCoord has its origin at the TOP-left, so y grows DOWNWARD. gp_yup() gives the more\n\
+         // familiar y-UP coordinates (origin bottom-left, up = +y, falling = -y) for effects with a direction.\n\
+         vec2 gp_yup(vec2 fragCoord) { return vec2(fragCoord.x, iResolution.y - fragCoord.y); }\n",
+    );
     out.push_str(END);
     out.push('\n');
     out
 }
 
-/// The shader without a previously generated header.
+/// Does the shader declare the universal `opacity` parameter (a float)?
+pub fn has_opacity(schema: &Schema) -> bool {
+    schema.params.iter().any(|p| p.name == OPACITY && matches!(p.kind, Kind::Float { .. }))
+}
+
+fn footer() -> String {
+    format!(
+        "{FOOTER_BEGIN}\n#undef mainImage\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {{\n    \
+         vec4 gp_base = texture(iChannel0, fragCoord / iResolution.xy);\n    vec4 gp_fx;\n    gp_effect(gp_fx, fragCoord);\n    \
+         fragColor = vec4(mix(gp_base.rgb, gp_fx.rgb, P_opacity), gp_fx.a);\n}}\n{FOOTER_END}\n"
+    )
+}
+
+/// The shader without a previously generated header (and opacity wrapper).
 pub fn strip_header(src: &str) -> &str {
-    if src.starts_with(BEGIN)
-        && let Some(i) = src.find(END)
+    let mut body = src;
+    if body.starts_with(BEGIN)
+        && let Some(i) = body.find(END)
     {
-        let after = &src[i + END.len()..];
-        return after.strip_prefix('\n').unwrap_or(after);
+        let after = &body[i + END.len()..];
+        body = after.strip_prefix('\n').unwrap_or(after);
     }
-    src
+    if let Some(i) = body.rfind(FOOTER_BEGIN)
+        && body[i..].contains(FOOTER_END)
+    {
+        body = &body[..i];
+    }
+    body
 }
 
 /// Does this text have any annotation (so it is worth parsing)?
 pub fn has_annotations(src: &str) -> bool {
     src.lines().any(|l| {
         let t = l.trim().strip_prefix("//").map(str::trim);
-        t.is_some_and(|t| t.starts_with("@color ") || t.starts_with("@float ") || t.starts_with("@preset "))
+        t.is_some_and(|t| ["@color ", "@float ", "@preset ", "@motion ", "@coverage "].iter().any(|k| t.starts_with(k)))
     })
 }
 
-/// The shader with its header regenerated from `values`. A shader with no parameters is returned
-/// unchanged; a shader whose annotations are malformed is an error (and is left alone by callers).
+/// The shader with its header (and, when it has an `opacity` parameter, its opacity wrapper) regenerated
+/// from `values`. A shader with no parameters is returned unchanged; one whose annotations are
+/// malformed is an error (and is left alone by callers).
 pub fn render(src: &str, values: &BTreeMap<String, String>) -> Result<String, String> {
+    render_scaled(src, values, 1.0)
+}
+
+/// Like [`render`], with the shader's opacity multiplied by `scale` (the profile's master opacity).
+pub fn render_scaled(src: &str, values: &BTreeMap<String, String>, scale: f64) -> Result<String, String> {
+    render_ctx(src, values, &RenderContext { opacity_scale: scale, ..RenderContext::default() })
+}
+
+/// The full form: the shader rendered for a profile (its effects opacity, its background color, whether it has a
+/// background image).
+pub fn render_ctx(src: &str, values: &BTreeMap<String, String>, ctx: &RenderContext) -> Result<String, String> {
+    let scale = ctx.opacity_scale;
     let body = strip_header(src);
     if !has_annotations(body) {
         return Ok(src.to_string());
@@ -320,8 +489,13 @@ pub fn render(src: &str, values: &BTreeMap<String, String>) -> Result<String, St
     if schema.params.is_empty() {
         return Ok(body.to_string());
     }
-    let resolved = resolve(&schema, values);
-    Ok(format!("{}{}", header(&schema, &resolved), body))
+    let mut resolved = resolve(&schema, values);
+    if let Some(i) = schema.params.iter().position(|p| p.name == OPACITY && matches!(p.kind, Kind::Float { .. })) {
+        let own = resolved[i].parse::<f64>().unwrap_or(1.0);
+        resolved[i] = format!("{}", (own * scale.clamp(0.0, 1.0)).clamp(0.0, 1.0));
+    }
+    let tail = if has_opacity(&schema) { footer() } else { String::new() };
+    Ok(format!("{}{}{}{}", header(&schema, &resolved, ctx), body, if body.ends_with('\n') { "" } else { "\n" }, tail))
 }
 
 #[cfg(test)]
@@ -478,11 +652,18 @@ mod tests {
         // the invalid values fell back to the defaults
         assert!(out.contains("P_wave_a = vec3(1.000000, 0.419608, 0.101961)") && out.contains("P_strength = 0.160000"));
         // every line of the generated header is a comment or one of the two declaration shapes
-        for line in header(&parse_schema(SRC).unwrap(), &resolve(&parse_schema(SRC).unwrap(), &evil)).lines() {
-            assert!(
-                line.starts_with("//") || line.starts_with("const vec3 P_") || line.starts_with("const float P_"),
-                "{line}"
-            );
+        let fixed: Vec<&str> = MASK_GLSL.lines().collect();
+        for line in
+            header(&parse_schema(SRC).unwrap(), &resolve(&parse_schema(SRC).unwrap(), &evil), &RenderContext::default())
+                .lines()
+        {
+            let ok = line.starts_with("//")
+                || line.starts_with("const vec3 P_")
+                || line.starts_with("const float P_")
+                || line.starts_with("#define mainImage")
+                || line.starts_with("vec2 gp_yup(")
+                || fixed.contains(&line);
+            assert!(ok, "an unexpected line in the generated header: {line}");
         }
         // the sidecar parser tolerates junk, binary-ish text and huge files without panicking
         let junk = format!("\u{0}=\u{1}\n=\n==\n{}\n", "x".repeat(10_000));
@@ -513,7 +694,7 @@ mod tests {
     #[test]
     fn header_is_idempotent_to_strip_and_ignores_text_lookalikes() {
         let s = parse_schema(SRC).unwrap();
-        let h = header(&s, &resolve(&s, &BTreeMap::new()));
+        let h = header(&s, &resolve(&s, &BTreeMap::new()), &RenderContext::default());
         let full = format!("{h}{SRC}");
         assert_eq!(strip_header(&full), SRC);
         assert_eq!(strip_header(SRC), SRC, "nothing to strip");
@@ -523,6 +704,67 @@ mod tests {
         // a begin marker with no end is left alone
         let broken = format!("{BEGIN}\nconst float P_a = 1.0;\n");
         assert_eq!(strip_header(&broken), broken);
+    }
+
+    #[test]
+    fn motion_and_coverage_annotations_are_parsed_and_bad_ones_rejected() {
+        let s = parse_schema("// @motion down\n// @coverage full\n// @float opacity 0.6 0 1 \"O\"\n").unwrap();
+        assert_eq!(s.motion, Some(Motion::Down));
+        assert!(s.coverage_full);
+        for m in ["down", "up", "left", "right", "radial", "none"] {
+            assert_eq!(parse_schema(&format!("// @motion {m}\n")).unwrap().motion.map(Motion::name), Some(m));
+        }
+        assert_eq!(parse_schema("void f() {}\n").unwrap().motion, None);
+        assert!(!parse_schema("void f() {}\n").unwrap().coverage_full);
+        assert!(parse_schema("// @motion sideways\n").unwrap_err().contains("unknown motion"));
+        assert!(parse_schema("// @coverage half\n").unwrap_err().contains("unknown coverage"));
+    }
+
+    const OP: &str = "// @float opacity 0.6 0.0 1.0 \"Opacity\"\n// @float strength 0.5 0.0 1.0 \"S\"\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = texture(iChannel0, fragCoord / iResolution.xy) + vec4(P_strength); }\n";
+
+    #[test]
+    fn a_shader_with_an_opacity_parameter_gets_the_wrapper_and_the_master_scale() {
+        let out = render(OP, &BTreeMap::new()).unwrap();
+        assert!(out.contains("#define mainImage gp_effect"), "the shader's own function is renamed");
+        assert!(
+            out.contains("#undef mainImage") && out.contains("void mainImage(out vec4 fragColor, in vec2 fragCoord)"),
+            "and wrapped"
+        );
+        assert!(out.contains("mix(gp_base.rgb, gp_fx.rgb, P_opacity)"), "opacity scales the effect, never the base");
+        assert!(out.contains("const float P_opacity = 0.600000;"));
+        // the master scale multiplies the shader's own opacity; it is clamped to 0..1
+        let half = render_scaled(OP, &BTreeMap::new(), 0.5).unwrap();
+        assert!(half.contains("P_opacity = 0.300000"), "{half}");
+        assert!(render_scaled(OP, &BTreeMap::new(), 7.0).unwrap().contains("P_opacity = 0.600000"));
+        assert!(render_scaled(OP, &BTreeMap::new(), -1.0).unwrap().contains("P_opacity = 0.000000"));
+        // rendering twice never stacks wrappers or headers, and stripping gives back the source
+        let again = render(&out, &BTreeMap::new()).unwrap();
+        assert_eq!(again, out, "idempotent");
+        assert_eq!(again.matches("opacity wrapper (generated").count(), 1);
+        assert_eq!(strip_header(&out), OP);
+        // a shader without an opacity parameter gets no wrapper
+        assert!(!render(SRC, &BTreeMap::new()).unwrap().contains("gp_effect"));
+    }
+
+    #[test]
+    fn the_header_tells_the_shader_the_background_and_defines_the_text_mask_and_the_y_up_helper() {
+        let ctx = RenderContext { opacity_scale: 1.0, background: (0x2c, 0x2c, 0x2c), background_image: false };
+        let out = render_ctx(OP, &BTreeMap::new(), &ctx).unwrap();
+        assert!(
+            out.contains("const vec3 P_bg = vec3(0.172549, 0.172549, 0.172549);")
+                && out.contains("const float P_bg_image = 0.0;")
+        );
+        assert!(
+            out.contains("float gp_textMask(vec2 fragCoord, vec4 term)") && out.contains("vec2 gp_yup(vec2 fragCoord)")
+        );
+        let img = render_ctx(OP, &BTreeMap::new(), &RenderContext { background_image: true, ..ctx }).unwrap();
+        assert!(img.contains("P_bg_image = 1.0"));
+        // the default context is Ghostty's own default background
+        assert!(render(OP, &BTreeMap::new()).unwrap().contains("P_bg = vec3(0.156863, 0.172549, 0.203922)"));
+        // a different background rewrites the header in place
+        let other = render_ctx(&out, &BTreeMap::new(), &RenderContext { background: (0, 0, 0), ..ctx }).unwrap();
+        assert!(other.contains("P_bg = vec3(0.000000, 0.000000, 0.000000)") && !other.contains("0.172549"));
+        assert_eq!(other.matches("const vec3 P_bg").count(), 1);
     }
 
     #[test]

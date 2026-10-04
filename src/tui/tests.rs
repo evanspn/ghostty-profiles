@@ -260,39 +260,123 @@ fn theme_filter_and_bake_copy_the_colors_into_the_profile() {
     assert!(h.app.theme_view.len() > 400);
 }
 
+fn shader_files(h: &Harness, profile: &str) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(h.app.store.profiles_dir().join(profile).join("shaders"))
+        .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
 #[test]
-fn shaders_toggle_copies_into_the_profile_and_manages_animation() {
+fn a_profile_has_one_shader_selecting_replaces_it_and_none_removes_it() {
     let mut h = harness();
     h.select_profile("calm-dark");
     h.app.tab = Tab::Shaders;
     let row = |h: &Harness, n: &str| h.app.shader_rows.iter().position(|r| r.name == n).unwrap();
-    assert!(h.app.shader_rows.iter().any(|r| r.name == "soft-glow.glsl" && r.enabled));
-    // turn the preset's shader off: entry gone, animation key gone with it
-    let i = row(&h, "soft-glow.glsl");
-    while h.app.shader_sel < i {
-        h.press(KeyCode::Down);
-    }
+    assert!(h.app.shader_rows[0].none && !h.app.shader_rows[0].enabled, "the (none) row is first");
+    assert!(h.app.shader_rows.iter().any(|r| r.name == "soft-glow.glsl" && r.enabled), "calm-dark uses soft-glow");
+    assert_eq!(h.app.shader_rows.iter().filter(|r| r.enabled).count(), 1, "radio: exactly one is selected");
+    assert_eq!(shader_files(&h, "calm-dark"), vec!["soft-glow.glsl"]);
+
+    // Enter on the one in use changes nothing
+    h.app.shader_sel = row(&h, "soft-glow.glsl");
     h.press(KeyCode::Enter);
-    assert!(!h.conf("calm-dark").contains("custom-shader"));
-    // turn an animated one on: copied into the profile, animation turned on
-    let i = row(&h, "aurora.glsl");
-    h.app.shader_sel = i;
+    assert!(h.app.status.text.contains("already"));
+
+    // selecting another REPLACES it: the line, and the old one's files
+    h.app.shader_sel = row(&h, "aurora.glsl");
     h.press(KeyCode::Enter);
     let conf = h.conf("calm-dark");
-    assert!(conf.contains("custom-shader = shaders/aurora.glsl"), "{conf}");
-    assert!(conf.contains("custom-shader-animation = true"));
-    let dir = h.app.store.profiles_dir().join("calm-dark");
-    assert!(dir.join("shaders/aurora.glsl").is_file());
-    // animation toggle
+    assert_eq!(conf.matches("custom-shader = ").count(), 1, "{conf}");
+    assert!(
+        conf.contains("custom-shader = shaders/aurora.glsl") && conf.contains("custom-shader-animation = true"),
+        "{conf}"
+    );
+    assert_eq!(shader_files(&h, "calm-dark"), vec!["aurora.glsl"], "the old rendered copy is gone");
+    let screen = h.screen(110, 30);
+    assert!(
+        screen.contains("(*) aurora.glsl") && screen.contains("( ) soft-glow.glsl") && screen.contains("( ) (none)"),
+        "{screen}"
+    );
+
+    // animation toggle belongs to the active shader
     h.press(KeyCode::Char('a'));
     assert!(h.conf("calm-dark").contains("custom-shader-animation = false"));
     h.press(KeyCode::Char('a'));
     assert!(h.conf("calm-dark").contains("custom-shader-animation = true"));
-    // a second shader stacks
+
+    // another replaces again, and (none) removes the shader and the animation flag
     h.app.shader_sel = row(&h, "crt-scanlines.glsl");
     h.press(KeyCode::Char(' '));
-    assert_eq!(h.conf("calm-dark").matches("custom-shader = ").count(), 2);
-    assert!(h.screen(100, 24).contains("[x] aurora.glsl"));
+    assert_eq!(h.conf("calm-dark").matches("custom-shader = ").count(), 1);
+    assert_eq!(shader_files(&h, "calm-dark"), vec!["crt-scanlines.glsl"]);
+    h.app.shader_sel = 0;
+    h.press(KeyCode::Enter);
+    let conf = h.conf("calm-dark");
+    assert!(!conf.contains("custom-shader"), "{conf}");
+    assert!(shader_files(&h, "calm-dark").is_empty(), "nothing left in shaders/: {:?}", shader_files(&h, "calm-dark"));
+    assert!(h.app.shader_rows[0].enabled, "(none) is now the selected one");
+}
+
+#[test]
+fn browsing_shaders_creates_no_files_in_the_profile() {
+    let mut h = harness();
+    h.select_profile("calm-dark");
+    h.app.tab = Tab::Shaders;
+    let before = shader_files(&h, "calm-dark");
+    let conf = h.conf("calm-dark");
+    h.app.shader_sel = 0;
+    h.press(KeyCode::Char('4'));
+    for _ in 0..h.app.shader_rows.len() + 3 {
+        h.press(KeyCode::Down);
+        let _ = h.screen(120, 30);
+        // a bundled shader that is not in use shows its parameters read-only
+        if h.app.shader_rows[h.app.shader_sel].in_library && !h.app.shader_rows[h.app.shader_sel].enabled {
+            assert!(h.app.preview.is_some(), "{}", h.app.shader_rows[h.app.shader_sel].name);
+            assert!(h.screen(120, 30).contains("Enter selects it"));
+        }
+    }
+    assert_eq!(shader_files(&h, "calm-dark"), before, "browsing wrote nothing");
+    assert_eq!(h.conf("calm-dark"), conf);
+    assert!(!h.app.store.profiles_dir().join("calm-dark/shaders/aurora.params").exists());
+    // moving the cursor onto the preview and pressing the parameter keys changes nothing either
+    for k in [KeyCode::Right, KeyCode::Char('R')] {
+        h.press(k);
+    }
+    assert_eq!(shader_files(&h, "calm-dark"), before);
+}
+
+#[test]
+fn only_shaders_the_user_wrote_are_listed_under_your_shaders_never_params_or_generated_files() {
+    let mut h = harness();
+    let dir = h.app.store.profiles_dir().join("shd/shaders");
+    // stale generated stuff and a params file with defaults, plus a shader the user wrote
+    fs::write(dir.join("snow.glsl"), include_str!("../../presets/shaders/snow.glsl")).unwrap();
+    fs::write(dir.join("snow.params"), "opacity = 0.6\n").unwrap();
+    fs::write(dir.join("mine.glsl"), "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }\n").unwrap();
+    h.select_profile("shd"); // loading the profile tidies its folder
+    h.app.tab = Tab::Shaders;
+    let names: Vec<_> = h.app.shader_rows.iter().map(|r| r.name.clone()).collect();
+    assert!(names.contains(&"mine.glsl".to_string()), "{names:?}");
+    assert!(!names.iter().any(|n| n.ends_with(".params")), "{names:?}");
+    assert_eq!(h.app.shader_rows.iter().filter(|r| r.user).count(), 1);
+    let screen = h.screen(120, 40);
+    assert!(
+        screen.contains("── Your shaders") && screen.contains("mine.glsl") && !screen.contains(".params"),
+        "{screen}"
+    );
+    assert!(dir.join("mine.glsl").exists(), "what the user wrote is never deleted");
+    assert!(
+        !dir.join("snow.glsl").exists() && !dir.join("snow.params").exists(),
+        "the generated copy and the default params were tidied away"
+    );
+    // the user's own shader can be selected like any other, and replaces the active one
+    h.app.shader_sel = h.app.shader_rows.iter().position(|r| r.name == "mine.glsl").unwrap();
+    h.press(KeyCode::Enter);
+    assert!(h.conf("shd").contains("custom-shader = shaders/mine.glsl"));
+    assert!(dir.join("mine.glsl").exists());
+    assert!(!dir.join("xmb-waves.glsl").exists(), "the replaced generated shader is gone");
 }
 
 #[test]
@@ -1410,7 +1494,7 @@ fn the_shader_list_shows_an_enabled_shaders_parameters_with_values_and_swatches(
     }
     // a swatch for each color, a bar for each number
     assert_eq!(h.app.param_swatches.borrow().len(), 2);
-    assert_eq!(h.app.param_bars.borrow().len(), 2);
+    assert_eq!(h.app.param_bars.borrow().len(), 3, "opacity, strength and speed");
     let buf = h.buffer(140, 30);
     let (r, _) = h.app.param_swatches.borrow()[0];
     assert_eq!(buf[(r.x, r.y)].fg, Color::Rgb(0xff, 0x6b, 0x1a), "the swatch is painted in the parameter's color");
@@ -1420,10 +1504,20 @@ fn the_shader_list_shows_an_enabled_shaders_parameters_with_values_and_swatches(
     h.press(KeyCode::Char('4'));
     assert!(h.app.params.is_none());
     h.press(KeyCode::Right);
-    assert!(h.app.status.text.contains("enable the shader first"));
-    let crt = h.app.shader_rows.iter().position(|r| r.name == "crt-scanlines.glsl").unwrap();
-    h.app.shader_sel = crt;
-    h.press(KeyCode::Char(' ')); // enable it
+    assert!(h.app.status.text.contains("choose the shader first"));
+    // a shader the user wrote has no annotations, so nothing to tune
+    let dir = h.app.store.profiles_dir().join("shd/shaders");
+    fs::write(
+        dir.join("mine.glsl"),
+        "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p / iResolution.xy); }\n",
+    )
+    .unwrap();
+    h.select_profile("aurora-glass");
+    h.select_profile("shd"); // reload so the file is found
+    h.app.refresh_profiles(Some("shd"));
+    h.app.tab = Tab::Shaders;
+    h.app.shader_sel = h.app.shader_rows.iter().position(|r| r.name == "mine.glsl").unwrap();
+    h.press(KeyCode::Char(' ')); // select it
     h.press(KeyCode::Right);
     assert!(h.app.status.text.contains("no tunable parameters"), "{}", h.app.status.text);
 }
@@ -1596,32 +1690,45 @@ fn mouse_clicks_swatches_and_drags_bars_in_the_parameter_list() {
 }
 
 #[test]
-fn enabling_a_shader_writes_its_header_and_its_parameters_appear_with_the_profiles_values() {
+fn selecting_a_shader_writes_its_header_and_its_parameters_appear_with_the_profiles_values() {
     let mut h = harness();
     h.apply("calm-dark"); // uses soft-glow only
     h.app.tab = Tab::Shaders;
     let i = h.app.shader_rows.iter().position(|r| r.name == "enchant-glyphs.glsl").unwrap();
     h.app.shader_sel = i;
     h.press(KeyCode::Char('4'));
-    assert!(h.app.params.is_none(), "not enabled yet, so no parameters");
+    assert!(h.app.params.is_none(), "not selected yet, so no parameters (only a read-only preview)");
     h.press(KeyCode::Enter);
     let text = h.shader_text("calm-dark", "enchant-glyphs");
     assert!(
         text.contains("const vec3 P_glyph_a") && text.contains("const float P_density"),
-        "the header is written the moment it is enabled"
+        "the header is written the moment it is selected"
     );
     assert!(h.app.params.is_some() && h.screen(140, 30).contains("Glyph color"));
     assert!(h.conf("calm-dark").contains("custom-shader = shaders/enchant-glyphs.glsl"));
     assert!(h.conf("calm-dark").contains("custom-shader-animation = true"), "animated shaders turn animation on");
-    // turning it off removes the entry but the parameter values the user chose are remembered
+    // a changed value is kept in a sidecar...
     h.go_to_param("density");
     h.press(KeyCode::Right);
-    let chosen = h.param_value("density");
+    let side = h.app.store.profiles_dir().join("calm-dark/shaders/enchant-glyphs.params");
+    assert!(side.is_file(), "the operator changed something, so the values are saved");
+    // ...and a value changed back to its default leaves no sidecar at all
+    h.press(KeyCode::Left);
+    assert!(
+        !side.exists(),
+        "every value equals its default again: no sidecar is kept: {}",
+        fs::read_to_string(&side).unwrap_or_default()
+    );
+    h.press(KeyCode::Right);
+    assert!(side.is_file());
+    h.press(KeyCode::Char('R'));
+    assert!(!side.exists());
+    // picking (none) removes the shader and everything generated for it
     h.press(KeyCode::Esc);
+    h.app.shader_sel = 0;
     h.press(KeyCode::Enter);
     assert!(!h.conf("calm-dark").contains("enchant-glyphs"));
-    h.press(KeyCode::Enter);
-    assert_eq!(h.param_value("density"), chosen, "back on, with the values it had");
+    assert!(shader_files(&h, "calm-dark").is_empty());
 }
 
 #[test]

@@ -1,24 +1,18 @@
-// Matrix rain: sparse columns of falling glyph-like blocks, DOWN the screen, each with a bright head and a short
-// dim trail, tintable. The glyphs are random 3x5 dot patterns (not any real font). Original code.
-// Only plain-background pixels are touched (text of any color, cursors and selections stay exactly as drawn) and nothing samples
+// Matrix rain: columns of falling glyph-like blocks with a bright head and a fading trail, tintable.
+// The glyphs are random 3x5 dot patterns (not any real font). Original code.
+// Only dark background pixels are touched (text stays exactly as drawn) and nothing samples
 // neighbouring pixels. Ghostty custom shader (Shadertoy-style). Tunable per profile.
 //
-// ORIENTATION: Ghostty's fragCoord has its origin at the TOP-left, so y grows DOWNWARD on screen (unlike
-// Shadertoy). This shader computes in y-UP coordinates through gp_yup() (generated into the header): up = +y,
-// so FALLING = -y = down the screen (the columns fall on purpose).
-//
-// @motion down
-// @float opacity 0.6 0.0 1.0 "Opacity"
 // @color glyph #00ff41 "Glyph color"
 // @color head #d6ffe0 "Head color"
 // @float strength 0.60 0.0 1.0 "Strength"
 // @float speed 0.80 0.1 3.0 "Speed"
-// @float density 0.07 0.02 0.9 "Density"
+// @float density 0.40 0.05 0.9 "Density"
 // @float size 0.024 0.012 0.06 "Glyph size"
-// @preset matrix glyph=#00ff41 head=#d6ffe0 strength=0.60 density=0.07
-// @preset cyber glyph=#22e3d1 head=#d8fffb strength=0.60 density=0.07
-// @preset amber glyph=#ffb000 head=#fff0c0 strength=0.60 density=0.07
-// @preset red glyph=#ff3b3b head=#ffd6d6 strength=0.55 density=0.06
+// @preset matrix glyph=#00ff41 head=#d6ffe0 strength=0.60 density=0.40
+// @preset cyber glyph=#22e3d1 head=#d8fffb strength=0.60 density=0.40
+// @preset amber glyph=#ffb000 head=#fff0c0 strength=0.60 density=0.40
+// @preset red glyph=#ff3b3b head=#ffd6d6 strength=0.55 density=0.35
 
 float hash21(vec2 p) {
     p = fract(p * vec2(0.3183099, 0.3678794));
@@ -29,17 +23,15 @@ float hash21(vec2 p) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec4 term = texture(iChannel0, uv);
-    // 1.0 only on plain terminal background: text of any color, the cursor, selections and a thin fringe
-    // around them are masked out (gp_textMask is generated into the header)
-    float bgMask = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float bgMask = 1.0 - smoothstep(0.30, 0.60, lum);
     if (P_strength <= 0.0001 || bgMask <= 0.001) {
         fragColor = term;
         return;
     }
 
-    vec2 fc = gp_yup(fragCoord);
     float cell = P_size * iResolution.y;
-    vec2 g = fc / vec2(cell * 0.6, cell);
+    vec2 g = fragCoord / vec2(cell * 0.6, cell);
     float colId = floor(g.x);
     float rows = floor(iResolution.y / cell);
     float rowFromTop = rows - floor(g.y) - 1.0;
@@ -48,11 +40,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float on = step(1.0 - P_density, hash21(vec2(colId, 5.0)));
     float rowsPerSec = (3.0 + 8.0 * h) * P_speed;
     float period = rows + 12.0 + h * 20.0;
-    float head = mod(iTime * rowsPerSec + h * period, period);   // rows from the top: it grows, so the column falls
+    float head = mod(iTime * rowsPerSec + h * period, period);
     float behind = head - rowFromTop;
-    float len = 4.0 + floor(h * 6.0);
-    float fade = 1.0 - behind / len;
-    float trail = on * step(0.0, behind) * step(behind, len) * fade * fade * 0.55;
+    float len = 8.0 + floor(h * 14.0);
+    float trail = on * step(0.0, behind) * step(behind, len) * (1.0 - behind / len);
     float isHead = on * step(abs(behind), 0.5);
 
     // a random 3x5 pattern per cell that changes now and then

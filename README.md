@@ -141,8 +141,10 @@ into the generated `~/.config/ghostty/ghostty-profiles-active.conf`, which is wh
 
 ## Shaders
 
-The Shaders tab lists the shader library plus the profile's own shaders. `Enter` turns one on for the selected profile (it is
-copied into the profile folder, so exports stay self-contained), `a` toggles animation.
+A profile uses **one** shader (or none). The Shaders tab is a radio list: `(none)`, the library, and a **Your shaders** section for
+shader files you wrote yourself in the profile's `shaders/` folder. `Enter` makes the shader under the cursor *the* shader (it replaces
+the current one and the old one's generated files are removed); `a` toggles animation. **Browsing writes nothing:** a bundled shader is
+copied into the profile only when you select it, and the cursor on one that is not in use shows what it declares, read-only.
 
 | Shader | What it draws |
 | --- | --- |
@@ -152,55 +154,126 @@ copied into the profile folder, so exports stay self-contained), `a` toggles ani
 | `xmb-mono` | grayscale waves with one tint (mono, warm, cool) |
 | `xmb-aurora-ribbons` | ribbons of light hanging from the top (borealis, ice, ember) |
 | `aurora` | slow curtains of light across the top, behind the text (borealis, arctic, solar) |
-| `enchant-glyphs` | glowing runes floating up, drawn procedurally from line strokes (enchanted, emerald, ember, sparse) |
-| `pixel-rain` | blocky rain at a slight angle with splash pixels and an optional thunder flash (drizzle, rain, storm, night) |
-| `matrix-rain` | falling glyph columns with bright heads (matrix, cyber, amber, red) |
-| `starfield` | three parallax layers of stars, optional warp streaks (deep-space, hyperdrive, warm) |
+| `enchant-glyphs` | glowing glyphs rising up the screen, drawn procedurally from line strokes (enchanted, emerald, ember, sparse) |
+| `pixel-rain` | blocky rain falling at a slight angle with splash pixels and an optional thunder flash (drizzle, rain, storm, night) |
+| `matrix-rain` | sparse falling glyph columns with bright heads and short dim trails (matrix, cyber, amber, red) |
+| `starfield` | three parallax layers of stars drifting left, optional warp streaks (deep-space, hyperdrive, warm) |
 | `snow` | soft falling snow in three layers (snowfall, blizzard, ash) |
-| `fireflies` | drifting glowing dots that pulse (fireflies, lanterns, spirits) |
-| `soft-glow` | a gentle vignette; an optional text glow (off by default, because it softens text) |
+| `fireflies` | a few drifting glowing dots that pulse (fireflies, lanterns, spirits) |
+| `soft-glow` | a gentle vignette on the background; an optional text glow (off by default, because it softens text) |
 | `crt-scanlines` | scanlines, vignette and a faint flicker |
 
-All of them are original code. The effect shaders only brighten **dark background pixels**: a pixel of text, and its
-edges, comes out exactly as the terminal drew it, and none of them reads a neighbouring pixel, so none of them can blur text.
-(`crt-scanlines` and the optional text glow of `soft-glow` are the exceptions by design.)
+All of them are original code.
+
+### Behind the text, never over it
+
+Every effect shader is gated by a **text mask** that `gpf` generates into the shader's header (`gp_textMask`). The mask is 1 wherever the
+terminal drew anything that is not plain background (text of **any** color, including dim `#4a4a4a` and near-black text, the cursor,
+selections, inverse video) and on a 1-2 pixel fringe around it, so anti-aliased edges are covered; it is 0 on plain background. The effect
+is only added where the mask is 0. The mask compares each pixel with the terminal's **background color**, which `gpf` takes from the
+profile (`background`, or the bundled theme named by `theme`, else Ghostty's default `#282c34`) and writes into the header as `P_bg`,
+so it also works on Ghostty builds that do not expose `iBackgroundColor`. The only neighbour reads are twelve taps within two pixels
+and they feed the mask alone: a color is never blended with its neighbours, so no effect can blur text.
+
+Limits, stated plainly:
+
+- With a **background image** the background is not one color, so the mask compares each pixel with a local estimate of the picture
+  (four taps 14 px out) and is more conservative. Text that is nearly the color of the picture under it cannot be told apart, and a large
+  flat block (a selection, a panel) looks like a patch of picture, so effects can show over it.
+- Text drawn in the background color inside an inverse-video block (the "hole" of a glyph) looks like background.
+- The mask is a color test, so it cannot protect a pixel that is exactly the background color but part of a glyph.
+- `crt-scanlines` modulates every pixel by design (that is what a CRT does) and is not gated.
+
+### Orientation (important when you write a shader)
+
+**In Ghostty `fragCoord` has its origin at the TOP-left and y grows DOWNWARD** (verified from the shader prefix Ghostty embeds in its
+own binary: it calls `mainImage(_fragColor, gl_FragCoord.xy)` with Metal's top-left position, and `iChannel0` is sampled with
+`fragCoord / iResolution.xy` and no flip). **Shadertoy is the other way round** (origin bottom-left, y up), so a Shadertoy shader that
+moves things "down" moves them *up* in Ghostty. A read-back image has row 0 at the top, which is `fragCoord.y = 0`.
+
+The generated header gives every shader `vec2 gp_yup(vec2 fragCoord)`, which returns familiar y-**up** coordinates (up = +y, falling =
+-y). The directional shaders here compute in y-up space with it, and declare their intent with `// @motion`:
+
+```glsl
+// @motion down        down | up | left | right | radial | none   (as the user sees it on screen)
+```
+
+`@motion` is parsed (shown by `gpf shader show`) and **tested**: the GPU tests render two frames a short time apart and measure the
+dominant shift of the effect in screen space (row index grows downward), then require it to match the declaration. Rain, matrix and
+snow fall down, `enchant-glyphs` rises up on purpose, `starfield` drifts left.
+
+### Opacity
+
+Every shader has an `opacity` parameter (the first row of its parameters) that scales the **effect layer** (what the shader adds), never
+the terminal's text. It is implemented by the generated header and footer, so a shader gets it by declaring
+`// @float opacity 0.6 0.0 1.0 "Opacity"`: the shader's own `mainImage` becomes `gp_effect` and a generated `mainImage` blends it over the
+untouched terminal with `mix(base, effect, P_opacity)`. The profile also has a **master effects opacity** that multiplies every shader's
+own: the bar at the top of the Shaders tab (`[` / `]` or click/drag it, `O` to type a value), or `gpf shader opacity PROFILE 0.5`. It lives in
+`effects.params` in the profile folder and travels with exports.
+
+### Not blocking the screen
+
+Particle effects (fireflies, snow, rain, matrix, stars, glyphs) are kept sparse: a **coverage budget** is part of the tests. At its default
+parameters an effect may add at most 6% light on average over the background and light at most 8% of the pixels noticeably, unless it
+declares `// @coverage full` (waves and ribbons, which are meant to span the screen). A shader that floods the screen fails the build.
 
 ### Tuning a shader
 
-Colors and numbers of a shader are editable per profile. With the shader on, press `→` in the Shaders tab:
+With the profile's shader selected, press `→` in the Shaders tab:
 
 - the **preset** row (`←→`) switches between the shader's named presets (for example `ember`, `ocean`, `forest`);
 - a **color** row: `Enter`/`p` or a click on its swatch opens the same hue wheel as the Edit tab;
 - a **number** row: `←→` nudge it (`Shift` for bigger steps), click or drag its bar, or `Enter` to type a value;
 - `R` resets the shader to its defaults, `Esc` goes back to the list.
 
-Every change is saved, the shader copy is regenerated, and Ghostty is reloaded after the usual short pause.
+Every change is saved, the shader copy is regenerated, and Ghostty is reloaded after the usual short pause. Values are kept in
+`shaders/<name>.params` **only while they differ from the defaults**: a shader in its default state has no sidecar.
 
-From the shell: `gpf shader show PROFILE SHADER`, `gpf shader set PROFILE SHADER NAME VALUE`,
-`gpf shader preset PROFILE SHADER PRESET`, `gpf shader reset PROFILE SHADER`.
+From the shell: `gpf shader show|set|preset|reset|use|opacity ...` (for example `gpf shader use PROFILE snow`,
+`gpf shader set PROFILE snow opacity 0.4`, `gpf shader use PROFILE none`).
+
+### One shader per profile, and the tidy-up
+
+The profile folder holds only the shader in use (its rendered `.glsl`, and its `.params` while they hold a change), plus anything you wrote.
+Older versions let a profile collect every shader you browsed; those are cleaned up automatically (when a profile is applied, and when it
+is loaded in the TUI) or on demand:
+
+```sh
+gpf prune --dry-run     # show what would go
+gpf prune [PROFILE]     # tidy one profile (default: all)
+```
+
+A prune removes only files it can prove are generated: copies identical to a bundled shader (or to a previous release's) that are not the
+profile's shader, and parameter files holding only defaults. **Anything you wrote or changed is kept** (shader files appear under
+*Your shaders*; parameter files with changed values for shaders that are not in use are kept and reported; `--drop-orphan-params` removes
+those too). A profile folder is **backed up once**, before the first deletion, to `~/.config/ghostty-profiles/backups/NAME.bak-pre-prune`.
+A profile that lists several `custom-shader` lines keeps the first and says so.
 
 ### Writing a tunable shader
 
 A shader declares its tunable values in comments:
 
 ```glsl
+// @motion down
+// @float opacity 0.6 0.0 1.0 "Opacity"
 // @color wave_a #ff6b1a "Wave color"
 // @float strength 0.16 0.0 0.5 "Strength"          (default, min, max)
 // @preset ocean wave_a=#2fa8ff strength=0.18
 ```
 
-and uses them as `P_wave_a` (a `vec3`) and `P_strength` (a `float`). The profile keeps its values in
-`shaders/<name>.params` (plain `name = value` lines); when the profile is applied, a header of `const` declarations is
-generated at the top of the profile's copy of the shader. Names are lowercase `a-z0-9_`; presets may also use `-`.
-A malformed annotation is an error naming its line, never silently ignored.
+and uses them as `P_opacity`, `P_wave_a` (a `vec3`) and `P_strength` (a `float`). The profile keeps its values in
+`shaders/<name>.params` (plain `name = value` lines); when the profile is applied, a header of `const` declarations (plus `P_bg`, `gp_textMask`,
+`gp_yup`) is generated at the top of the profile's copy of the shader. Names are lowercase `a-z0-9_`; presets may also use `-`.
+`// @coverage full` exempts a shader that is meant to span the screen from the coverage budget. A malformed annotation is an error
+naming its line, never silently ignored.
 
 **Safety:** a `.params` file can arrive inside a shared profile. Nothing from it is ever pasted into GLSL as text: each value
 is parsed (a hex color, or a finite number inside the declared range) and the header is built from the parsed numbers, so it can
-only choose numbers. Invalid values fall back to the defaults. `export` carries the `.params` file and the rendered shader;
-`import` still strips everything but appearance settings.
+only choose numbers. Invalid values fall back to the defaults. `export` carries the `.params` file, the profile's `effects.params` and the
+rendered shader; `import` still strips everything but appearance settings.
 
-Copies of shaders from older releases that you never edited (`xmb-waves`, `aurora`, `soft-glow`) are upgraded to the current,
-tunable version the next time the profile is applied; a copy you changed is left alone.
+Untouched copies of shaders from older releases are upgraded to the current version the next time the profile is applied; a copy you
+changed is left alone.
 
 ### Sharing and your own images
 
@@ -231,7 +304,7 @@ and your config files are backed up once as `*.bak-pre-ghostty-profiles`. Adopti
 ## Commands
 
 ```
-gpf [list | apply NAME | off | rename OLD NEW | delete NAME [--yes] | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
+gpf [list | apply NAME | off | rename OLD NEW | delete NAME [--yes] | prune [PROFILE] [--dry-run] | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
      | import PATH [--name N] | install-presets [--force] | reload | status | unlink]
 ```
 

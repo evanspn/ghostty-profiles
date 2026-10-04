@@ -1,19 +1,16 @@
 // The original PS3 XMB look: slow white and blue ribbons over a deep blue gradient.
 // Ghostty custom shader (Shadertoy-style). Tunable per profile (see xmb-waves.glsl for how).
 //
-// @motion none
-// @coverage full
-// @float opacity 1.0 0.0 1.0 "Opacity"
 // @color ribbon #dfeaff "Ribbon"
 // @color glow #3b82f6 "Glow"
-// @color bg_top #020817 "Gradient top"
-// @color bg_bottom #0c2a6b "Gradient bottom"
+// @color bg_top #0c2a6b "Gradient top"
+// @color bg_bottom #020817 "Gradient bottom"
 // @float tint 0.30 0.0 0.8 "Background tint"
 // @float strength 0.20 0.0 0.5 "Strength"
 // @float speed 0.18 0.02 1.0 "Speed"
-// @preset classic ribbon=#dfeaff glow=#3b82f6 bg_top=#020817 bg_bottom=#0c2a6b tint=0.30 strength=0.20
-// @preset midnight ribbon=#9db4ff glow=#2a3cff bg_top=#000208 bg_bottom=#050a2a tint=0.40 strength=0.18
-// @preset daybreak ribbon=#fff1d6 glow=#ff9a5c bg_top=#110a1f bg_bottom=#3a2a6b tint=0.30 strength=0.20
+// @preset classic ribbon=#dfeaff glow=#3b82f6 bg_top=#0c2a6b bg_bottom=#020817 tint=0.30 strength=0.20
+// @preset midnight ribbon=#9db4ff glow=#2a3cff bg_top=#050a2a bg_bottom=#000208 tint=0.40 strength=0.18
+// @preset daybreak ribbon=#fff1d6 glow=#ff9a5c bg_top=#3a2a6b bg_bottom=#110a1f tint=0.30 strength=0.20
 
 float ribbon(vec2 p, float t, float seed, float amp, float freq) {
     float y = 0.5
@@ -26,12 +23,11 @@ float ribbon(vec2 p, float t, float seed, float amp, float freq) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec4 term = texture(iChannel0, uv);
-    float textFree = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
 
-    // the gradient only shows through on plain background, so text is untouched
-    // uv.y = 0 is the TOP of the window (Ghostty's fragCoord has y pointing down)
-    vec3 grad = mix(P_bg_top, P_bg_bottom, uv.y);
-    float dark = textFree;
+    // the gradient only shows through where the terminal is dark, so text is untouched
+    vec3 grad = mix(P_bg_bottom, P_bg_top, uv.y);
+    float dark = 1.0 - smoothstep(0.10, 0.45, lum);
     vec3 base = mix(term.rgb, grad, P_tint * dark);
 
     float t = iTime * P_speed;
@@ -44,6 +40,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     }
     col *= smoothstep(0.0, 0.2, uv.y) * smoothstep(1.0, 0.75, uv.y);
 
-    float textGuard = textFree;
+    float textGuard = 1.0 - smoothstep(0.35, 0.8, lum);
     fragColor = vec4(base + col * P_strength * textGuard, term.a);
 }

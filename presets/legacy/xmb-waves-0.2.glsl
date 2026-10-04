@@ -3,9 +3,6 @@
 // ghostty-profiles reads the @ lines below and writes the P_* constants at the top of the
 // profile's copy of this file. Presets are named sets of values.
 //
-// @motion none
-// @coverage full
-// @float opacity 1.0 0.0 1.0 "Opacity"
 // @color wave_a #ff6b1a "Wave color"
 // @color wave_b #e31a24 "Accent"
 // @float strength 0.16 0.0 0.5 "Strength"
@@ -49,8 +46,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     col *= band;
 
     // dim the effect where the terminal is bright (text) to protect legibility
-    // keep the effect behind the text: only plain background (see gp_textMask in the header) gets light
-    float textGuard = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float textGuard = 1.0 - smoothstep(0.35, 0.8, lum);
 
     fragColor = vec4(term.rgb + col * P_strength * textGuard, term.a);
 }

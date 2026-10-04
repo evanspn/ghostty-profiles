@@ -18,7 +18,7 @@ use super::fields::{self, Field, Kind};
 use crate::ghostty::{self, Reloader, Theme};
 use crate::presets;
 use crate::profile::{AssetKind, Profile};
-use crate::store::{Store, atomic_write, valid_name};
+use crate::store::{Store, valid_name};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -52,6 +52,8 @@ pub enum InputKind {
     Rename(String),
     /// Setting a parameter (by name) of the selected shader: a color (with the picker) or a number.
     ShaderParam(String),
+    /// The profile-wide effects opacity, typed.
+    EffectsOpacity,
     NewProfile,
     Export,
     Filter,
@@ -135,7 +137,12 @@ enum Base {
 pub struct ShaderRow {
     pub name: String,
     pub in_library: bool,
+    /// This is the profile's one active shader (radio-style: for the `none` row, no shader is active).
     pub enabled: bool,
+    /// A shader file the user wrote, found in the profile folder (not a copy of a bundled one).
+    pub user: bool,
+    /// The "(none)" row at the top: no shader.
+    pub none: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +184,12 @@ pub struct App {
 
     /// The selected shader's tunable parameters, when it is enabled in the profile and has some.
     pub params: Option<crate::profile::ParamState>,
+    /// What the cursor's (not active) library shader declares: shown read-only, nothing is written to the profile.
+    pub preview: Option<crate::shaderparams::Schema>,
+    /// Where the master effects-opacity bar was drawn (clickable).
+    pub effects_bar: RefCell<Option<Rect>>,
+    /// Profiles already tidied (pruned) this session.
+    pruned: std::collections::HashSet<String>,
     /// The cursor is in the parameter list (right pane) of the Shaders tab, not the shader list.
     pub param_focus: bool,
     pub param_sel: usize,
@@ -221,6 +234,9 @@ impl App {
             shader_rows: Vec::new(),
             shader_sel: 0,
             params: None,
+            preview: None,
+            effects_bar: RefCell::new(None),
+            pruned: std::collections::HashSet::new(),
             param_focus: false,
             param_sel: 0,
             param_swatches: RefCell::new(Vec::new()),
@@ -261,6 +277,14 @@ impl App {
     }
 
     fn load_selected(&mut self) {
+        // a profile keeps ONE shader: tidy the folder of the profile being loaded (once per session)
+        if let Some(name) = self.current_name().map(str::to_string)
+            && self.pruned.insert(name.clone())
+            && let Ok(report) = self.store.prune_profile(&name, false, false)
+            && !report.is_empty()
+        {
+            self.say(prune_message(&name, &report), true);
+        }
         self.profile = self.current_name().and_then(|n| self.store.load(n).ok());
         self.rebuild_shader_rows();
     }
@@ -739,20 +763,39 @@ impl App {
 
     // ---- Shaders tab ----------------------------------------------------------------
     pub fn rebuild_shader_rows(&mut self) {
-        let enabled: Vec<String> = self.profile.as_ref().map(Profile::shaders).unwrap_or_default();
-        let is_on = |name: &str| enabled.iter().any(|e| e == &format!("shaders/{name}"));
-        let mut rows: Vec<ShaderRow> = presets::shader_names()
-            .into_iter()
-            .map(|name| ShaderRow { enabled: is_on(&name), name, in_library: true })
-            .collect();
-        if let Some(p) = &self.profile
-            && let Ok(rd) = std::fs::read_dir(p.dir.join("shaders"))
-        {
-            let mut own: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-            own.sort();
-            for name in own {
-                if !rows.iter().any(|r| r.name == name) {
-                    rows.push(ShaderRow { enabled: is_on(&name), name, in_library: false });
+        let active_file = self
+            .profile
+            .as_ref()
+            .and_then(Profile::active_shader)
+            .map(|r| r.rsplit('/').next().unwrap_or(&r).to_string());
+        let mut rows = vec![ShaderRow {
+            name: String::new(),
+            in_library: false,
+            enabled: active_file.is_none(),
+            user: false,
+            none: true,
+        }];
+        let library = presets::shader_names();
+        for name in &library {
+            rows.push(ShaderRow {
+                enabled: active_file.as_deref() == Some(name.as_str()),
+                name: name.clone(),
+                in_library: true,
+                user: false,
+                none: false,
+            });
+        }
+        // shader files the user wrote (never copies of bundled ones, never parameter or generated files)
+        if let Some(p) = &self.profile {
+            for name in p.user_shaders() {
+                if !library.contains(&name) {
+                    rows.push(ShaderRow {
+                        enabled: active_file.as_deref() == Some(name.as_str()),
+                        name,
+                        in_library: false,
+                        user: true,
+                        none: false,
+                    });
                 }
             }
         }
@@ -765,9 +808,15 @@ impl App {
     /// shader up to the current version (only done on the Shaders tab, never while just browsing).
     fn refresh_params(&mut self, write: bool) {
         self.params = None;
+        self.preview = None;
         let (Some(p), Some(row)) = (self.profile.as_ref(), self.shader_rows.get(self.shader_sel)) else { return };
-        if !row.enabled {
+        if row.none || !row.enabled {
             self.param_focus = false;
+            if row.in_library && !row.enabled {
+                // browsing: read what the bundled shader declares, in memory; nothing is copied into the profile
+                self.preview =
+                    presets::shader_source(&row.name).and_then(|src| crate::shaderparams::parse_schema(src).ok());
+            }
             return;
         }
         if write {
@@ -808,20 +857,40 @@ impl App {
             self.refresh_params(true);
         }
         match key.code {
-            KeyCode::Enter | KeyCode::Char(' ') => self.toggle_shader(),
+            KeyCode::Enter | KeyCode::Char(' ') => self.select_shader(),
             KeyCode::Char('a') => self.toggle_animation(),
+            KeyCode::Char('[') => {
+                self.set_effects_opacity(self.effects_opacity() - 0.1);
+            }
+            KeyCode::Char(']') => {
+                self.set_effects_opacity(self.effects_opacity() + 0.1);
+            }
+            KeyCode::Char('O') => self.begin_effects_opacity(),
             KeyCode::Right | KeyCode::Char('l') => {
                 if self.params.is_some() {
                     self.param_focus = true;
-                } else if self.shader_rows.get(self.shader_sel).is_some_and(|r| r.enabled) {
+                } else if self.shader_rows.get(self.shader_sel).is_some_and(|r| r.enabled && !r.none) {
                     self.say("this shader has no tunable parameters", false);
                 } else {
-                    self.say("enable the shader first (Enter), then → edits its parameters", false);
+                    self.say("choose the shader first (Enter), then → edits its parameters", false);
                 }
             }
             KeyCode::Char('R') => self.reset_params(),
             _ => {}
         }
+    }
+
+    fn begin_effects_opacity(&mut self) {
+        if self.profile.is_none() {
+            self.say("no profile selected", false);
+            return;
+        }
+        self.input = Some(Input {
+            kind: InputKind::EffectsOpacity,
+            title: "Effects opacity for every shader in this profile (0..1)".into(),
+            buf: crate::shaderparams::format_number(self.effects_opacity()),
+            error: None,
+        });
     }
 
     fn params_key(&mut self, key: KeyEvent) {
@@ -832,6 +901,13 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.param_sel = self.param_sel.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.param_sel = (self.param_sel + 1).min(rows.saturating_sub(1)),
             KeyCode::Char('R') => self.reset_params(),
+            KeyCode::Char('[') => {
+                self.set_effects_opacity(self.effects_opacity() - 0.1);
+            }
+            KeyCode::Char(']') => {
+                self.set_effects_opacity(self.effects_opacity() + 0.1);
+            }
+            KeyCode::Char('O') => self.begin_effects_opacity(),
             KeyCode::Left | KeyCode::Char('h') => self.adjust_param(false, big),
             KeyCode::Right | KeyCode::Char('l') => self.adjust_param(true, big),
             KeyCode::Char('p') | KeyCode::Enter => self.edit_param(),
@@ -953,49 +1029,54 @@ impl App {
         }
     }
 
-    pub fn toggle_shader(&mut self) {
+    /// Enter on a row of the Shaders tab: make that shader THE shader of the profile (radio-style: it replaces
+    /// the current one and the old one's generated files are removed), or choose "(none)". Only now is a
+    /// bundled shader copied into the profile.
+    pub fn select_shader(&mut self) {
         let Some(row) = self.shader_rows.get(self.shader_sel).cloned() else { return };
         let Some(p) = self.profile.as_mut() else {
             self.say("no profile selected: move off \"(none)\" on the Profiles tab to edit one", false);
             return;
         };
-        let rel = format!("shaders/{}", row.name);
-        let mut list = p.shaders();
         if row.enabled {
-            list.retain(|s| *s != rel);
-            p.set_shaders(&list);
-        } else {
-            let file = p.dir.join(&rel);
-            if !file.exists() {
-                match presets::shader_source(&row.name) {
-                    Some(src) => {
-                        if let Err(e) = atomic_write(&file, src) {
-                            self.say(format!("could not copy shader: {e:#}"), false);
-                            return;
-                        }
-                    }
-                    None => {
-                        self.say(format!("shader file missing: {rel}"), false);
-                        return;
-                    }
-                }
-            }
-            let animated = std::fs::read_to_string(&file).is_ok_and(|s| s.contains("iTime"));
-            if !list.contains(&rel) {
-                list.push(rel);
-            }
-            p.set_shaders(&list);
-            if animated && p.get("custom-shader-animation").is_none() {
-                p.set("custom-shader-animation", "true");
-            }
-            // write the shader's parameter header (defaults, or the profile's saved values)
-            let _ = p.render_shaders();
+            let text = if row.none { "this profile has no shader" } else { "that is already this profile's shader" };
+            self.say(text, true);
+            return;
         }
-        let what = format!("shader {} {}", row.name, if row.enabled { "off" } else { "on" });
+        let result = if row.none { p.clear_shader() } else { p.use_shader(&row.name) };
+        if let Err(e) = result {
+            self.say(format!("{e:#}"), false);
+            return;
+        }
+        let what = if row.none { "shader removed".to_string() } else { format!("shader {} selected", row.name) };
         self.commit(&what);
         self.param_focus = false;
         self.rebuild_shader_rows();
         self.refresh_params(true);
+    }
+
+    // ---- the profile-wide effects opacity ------------------------------------------------
+    pub fn effects_opacity(&self) -> f64 {
+        self.profile.as_ref().map(Profile::effects_opacity).unwrap_or(1.0)
+    }
+
+    pub fn set_effects_opacity(&mut self, value: f64) -> bool {
+        let value = (value.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+        let Some(p) = self.profile.as_ref() else {
+            self.say("no profile selected", false);
+            return false;
+        };
+        match p.set_effects_opacity(value) {
+            Ok(()) => {
+                self.commit(&format!("effects opacity {}%", (value * 100.0).round()));
+                self.refresh_params(false);
+                true
+            }
+            Err(e) => {
+                self.say(format!("{e:#}"), false);
+                false
+            }
+        }
     }
 
     pub fn toggle_animation(&mut self) {
@@ -1107,7 +1188,11 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(i) = self.float_drag {
-                    self.drag_float(i, col);
+                    if i == usize::MAX {
+                        self.drag_effects(col);
+                    } else {
+                        self.drag_float(i, col);
+                    }
                 } else {
                     self.picker_drag(col, row);
                 }
@@ -1124,6 +1209,14 @@ impl App {
 
     /// A click in the Shaders tab's parameter list: a swatch opens the picker, a slider sets the number.
     fn shader_press(&mut self, col: u16, row: u16) {
+        let bar = *self.effects_bar.borrow();
+        if let Some(bar) = bar
+            && contains(bar, col, row)
+        {
+            self.float_drag = Some(usize::MAX);
+            self.drag_effects(col);
+            return;
+        }
         let swatch = self.param_swatches.borrow().iter().find(|(r, _)| contains(*r, col, row)).map(|(_, i)| *i);
         if let Some(i) = swatch {
             self.open_shader_color(i);
@@ -1135,6 +1228,14 @@ impl App {
             self.param_sel = i + usize::from(self.has_preset_row());
             self.float_drag = Some(i);
             self.drag_float(i, col);
+        }
+    }
+
+    fn drag_effects(&mut self, col: u16) {
+        let Some(bar) = *self.effects_bar.borrow() else { return };
+        let frac = color::bar_fraction(col as i32 - bar.x as i32, bar.width) as f64;
+        if (self.effects_opacity() - (frac * 100.0).round() / 100.0).abs() > 1e-9 {
+            self.set_effects_opacity(frac);
         }
     }
 
@@ -1275,6 +1376,15 @@ impl App {
                 let copy_from = self.current_name().map(str::to_string);
                 self.wizard = Some(Wizard { name, step: WizardStep::Base(0), copy_from });
             }
+            InputKind::EffectsOpacity => match input.buf.trim().parse::<f64>() {
+                Ok(v) if v.is_finite() && (0.0..=1.0).contains(&v) => {
+                    self.set_effects_opacity(v);
+                }
+                _ => {
+                    self.say("effects opacity must be a number between 0 and 1", false);
+                    self.input = Some(Input { error: Some(self.status.text.clone()), ..input });
+                }
+            },
             InputKind::ShaderParam(ref name) => {
                 if !self.set_param(name, &input.buf) {
                     let error = Some(self.status.text.clone());
@@ -1325,6 +1435,26 @@ impl App {
             }
         }
     }
+}
+
+/// The status line after a tidy-up (also used by the CLI).
+pub fn prune_message(name: &str, r: &crate::profile::PruneReport) -> String {
+    let mut parts = Vec::new();
+    if !r.removed.is_empty() {
+        parts.push(format!(
+            "removed {} unused shader file{}",
+            r.removed.len(),
+            if r.removed.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if !r.dropped_extra_lines.is_empty() {
+        parts.push(format!("kept only the first shader (dropped {})", r.dropped_extra_lines.join(", ")));
+    }
+    let mut msg = format!("tidied '{name}': {}", parts.join("; "));
+    if let Some(b) = &r.backup {
+        msg.push_str(&format!(" (backup: {})", b.display()));
+    }
+    msg
 }
 
 fn expand(s: &str) -> PathBuf {

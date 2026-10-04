@@ -134,6 +134,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     app.swatch_rects.borrow_mut().clear();
     app.param_swatches.borrow_mut().clear();
     app.param_bars.borrow_mut().clear();
+    *app.effects_bar.borrow_mut() = None;
     let [tabs, body, footer] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)]).areas(f.area());
 
@@ -345,47 +346,132 @@ fn draw_edit(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_shaders(f: &mut Frame, area: Rect, app: &App) {
     let [left, right] = halves(area);
-    let items: Vec<ListItem> = app
-        .shader_rows
-        .iter()
-        .map(|r| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    if r.enabled { "[x] " } else { "[ ] " },
-                    Style::default().fg(if r.enabled { ACCENT } else { Color::Reset }),
-                ),
-                Span::raw(r.name.clone()),
-                Span::styled(if r.in_library { "" } else { "  (this profile)" }, dim()),
-            ]))
-        })
-        .collect();
-    let mut st = ListState::default().with_selected((!app.shader_rows.is_empty()).then_some(app.shader_sel));
+    // radio list: "(none)", then the library, then "Your shaders" (files the user wrote), if there are any
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_row = 0;
+    let mut section = "";
+    for (i, r) in app.shader_rows.iter().enumerate() {
+        let want = if r.none {
+            ""
+        } else if r.user {
+            "Your shaders"
+        } else {
+            "Library"
+        };
+        if want != section && !want.is_empty() {
+            items.push(ListItem::new(Line::styled(format!("── {want}"), dim())));
+        }
+        section = want;
+        if i == app.shader_sel {
+            selected_row = items.len();
+        }
+        let label = if r.none { "(none)".to_string() } else { r.name.clone() };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(
+                if r.enabled { "(*) " } else { "( ) " },
+                Style::default().fg(if r.enabled { ACCENT } else { Color::Reset }),
+            ),
+            Span::styled(label, if r.none { dim() } else { Style::default() }),
+        ])));
+    }
+    let mut st = ListState::default().with_selected((!app.shader_rows.is_empty()).then_some(selected_row));
     let list_style = if app.param_focus { dim() } else { Style::default() };
     f.render_stateful_widget(
-        List::new(items).style(list_style).block(list_block("Shaders")).highlight_style(highlight()),
+        List::new(items).style(list_style).block(list_block("Shader (one per profile)")).highlight_style(highlight()),
         left,
         &mut st,
     );
 
+    // the profile-wide effects opacity sits above whatever else the pane shows
+    let [master, rest] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(right);
+    draw_master(f, master, app);
+
     if let Some(state) = &app.params {
-        draw_params(f, right, app, state);
+        draw_params(f, rest, app, state);
+        return;
+    }
+    if let Some(schema) = &app.preview {
+        draw_preview_schema(f, rest, app, schema);
         return;
     }
     let anim = app.profile.as_ref().and_then(|p| p.get("custom-shader-animation")).unwrap_or_else(|| "unset".into());
     let text = vec![
-        Line::from("Enter / space toggles the shader for this profile."),
-        Line::from("a toggles animation (custom-shader-animation)."),
-        Line::from("Enable a shader, then → edits its colors and numbers."),
+        Line::from(
+            "A profile uses ONE shader. Enter selects the shader under the cursor (it replaces the current one).",
+        ),
+        Line::from("Browsing changes nothing: a shader is copied into the profile only when you select it."),
+        Line::from("a toggles animation (custom-shader-animation); R resets the shader's parameters."),
         Line::raw(""),
         Line::from(format!("animation: {anim}")),
         Line::raw(""),
-        Line::styled("Shaders are copied into the profile folder, so exports stay self-contained.", dim()),
         Line::styled(
             "Shader compile errors are not shown by Ghostty: if the window looks unchanged, the shader may have failed.",
             dim(),
         ),
     ];
-    f.render_widget(Paragraph::new(text).block(list_block("About")).wrap(Wrap { trim: true }), right);
+    f.render_widget(Paragraph::new(text).block(list_block("About")).wrap(Wrap { trim: true }), rest);
+}
+
+/// The profile-wide "effects opacity": one bar that scales every shader of the profile.
+fn draw_master(f: &mut Frame, area: Rect, app: &App) {
+    let block = list_block("Effects opacity (this profile)  [ ] adjust · O type");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let v = app.effects_opacity();
+    let label = format!("{:>3}%  ", (v * 100.0).round() as u32);
+    let bar_x = inner.x + label.chars().count() as u16;
+    let width = (inner.x + inner.width).saturating_sub(bar_x).min(24);
+    let mut spans = vec![Span::raw(label)];
+    if width >= 4 {
+        let at = color::bar_cell(v as f32, width);
+        spans.push(Span::styled(
+            (0..width).map(|c| if c <= at { '█' } else { '░' }).collect::<String>(),
+            Style::default().fg(ACCENT),
+        ));
+        *app.effects_bar.borrow_mut() = Some(Rect { x: bar_x, y: inner.y, width, height: 1 });
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+/// A bundled shader that is not the profile's shader: what it declares, read from the library (nothing is written).
+fn draw_preview_schema(f: &mut Frame, area: Rect, app: &App, schema: &crate::shaderparams::Schema) {
+    use crate::shaderparams as sp;
+    let name = app.shader_rows.get(app.shader_sel).map(|r| r.name.clone()).unwrap_or_default();
+    let mut lines = vec![
+        Line::styled(
+            "Not this profile's shader. Enter selects it (and replaces the current one).",
+            Style::default().fg(ACCENT),
+        ),
+        Line::raw(""),
+    ];
+    if let Some(m) = schema.motion {
+        lines.push(Line::from(format!(
+            "motion: {}{}",
+            m.name(),
+            if schema.coverage_full { " · spans the screen" } else { "" }
+        )));
+    }
+    for p in &schema.params {
+        let kind = match p.kind {
+            sp::Kind::Color => "color".to_string(),
+            sp::Kind::Float { min, max } => format!("{min}..{max}"),
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {:<18} ", p.label)),
+            Span::styled(format!("{} ({kind})", p.default), dim()),
+        ]));
+    }
+    if !schema.presets.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(format!(
+            "presets: {}",
+            schema.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(list_block(&format!("{name}: preview"))).wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 /// The selected shader's tunable parameters: a preset row, then one row per color or number.
@@ -471,7 +557,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Tab::Edit => {
             "↑↓ select · Enter edit · p color picker (or click a swatch) · ←→ cycle · x unset · ctrl+r reload · q quit"
         }
-        Tab::Shaders => "↑↓ select · Enter toggle · → parameters · R reset · a animation · Tab next · q quit",
+        Tab::Shaders => {
+            "↑↓ browse · Enter use this shader · → parameters · R reset · [ ] effects opacity · a animation · q quit"
+        }
     };
     let text = vec![Line::styled(app.status.text.clone(), Style::default().fg(color)), Line::styled(help, dim())];
     f.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::TOP)), area);

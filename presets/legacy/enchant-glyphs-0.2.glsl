@@ -1,25 +1,19 @@
-// Enchanting-table inspired: small glowing runes drifting UP behind the text, with a few sparkles.
+// Enchanting-table inspired: small glowing runes drifting upward behind the text, with a few sparkles.
 // The runes are drawn procedurally from simple line strokes on a 3x3 grid of points, in a
 // "mysterious alphabet" style. No game fonts, textures or artwork are used. Original code.
-// Only plain-background pixels are touched (text of any color, cursors and selections stay exactly as drawn) and nothing samples
+// Only dark background pixels are touched (text stays exactly as drawn) and nothing samples
 // neighbouring pixels. Ghostty custom shader (Shadertoy-style). Tunable per profile.
 //
-// ORIENTATION: Ghostty's fragCoord has its origin at the TOP-left, so y grows DOWNWARD on screen (unlike
-// Shadertoy). This shader computes in y-UP coordinates through gp_yup() (generated into the header): up = +y,
-// so RISING = +y = up the screen (runes float up on purpose).
-//
-// @motion up
-// @float opacity 0.6 0.0 1.0 "Opacity"
 // @color glyph_a #b36bff "Glyph color"
 // @color glyph_b #4df0ff "Glow color"
 // @float strength 0.60 0.0 1.0 "Strength"
 // @float speed 0.25 0.02 1.5 "Speed"
-// @float density 0.16 0.05 0.8 "Density"
+// @float density 0.30 0.05 0.8 "Density"
 // @float size 0.09 0.04 0.25 "Glyph size"
-// @preset enchanted glyph_a=#b36bff glyph_b=#4df0ff strength=0.60 density=0.16
-// @preset emerald glyph_a=#5dff9a glyph_b=#2bd1ff strength=0.60 density=0.16
-// @preset ember glyph_a=#ffa14d glyph_b=#ff5252 strength=0.60 density=0.14
-// @preset sparse glyph_a=#b36bff glyph_b=#4df0ff strength=0.50 density=0.07
+// @preset enchanted glyph_a=#b36bff glyph_b=#4df0ff strength=0.60 density=0.30
+// @preset emerald glyph_a=#5dff9a glyph_b=#2bd1ff strength=0.60 density=0.30
+// @preset ember glyph_a=#ffa14d glyph_b=#ff5252 strength=0.60 density=0.25
+// @preset sparse glyph_a=#b36bff glyph_b=#4df0ff strength=0.50 density=0.12
 
 float hash21(vec2 p) {
     p = fract(p * vec2(0.3183099, 0.3678794));
@@ -61,19 +55,17 @@ float rune(vec2 q, float id) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec4 term = texture(iChannel0, uv);
-    // 1.0 only on plain terminal background: text of any color, the cursor, selections and a thin fringe
-    // around them are masked out (gp_textMask is generated into the header)
-    float bgMask = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float bgMask = 1.0 - smoothstep(0.30, 0.60, lum);
     if (P_strength <= 0.0001 || bgMask <= 0.001) {
         fragColor = term;
         return;
     }
 
-    vec2 fc = gp_yup(fragCoord);
     float t = iTime * P_speed;
     float cell = P_size * iResolution.y;
-    vec2 p = fc / cell;
-    // every column floats at its own pace; the pattern moves DOWN in y-up space, so the runes rise
+    vec2 p = fragCoord / cell;
+    // every column floats at its own pace
     float colId = floor(p.x);
     p.y -= t * (0.5 + hash21(vec2(colId, 3.0)));
     vec2 id = floor(p);
@@ -89,11 +81,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 c = mix(P_glyph_a, P_glyph_b, hash21(id + 9.0));
 
     // a few sparkles
-    vec2 sp = fc / (cell * 0.35);
+    vec2 sp = fragCoord / (cell * 0.35);
     sp.y -= t * 1.4;
     vec2 sid = floor(sp);
     float sh = hash21(sid + 41.0);
-    float spark = step(0.992, sh) * (1.0 - smoothstep(0.0, 0.28, length(fract(sp) - 0.5)))
+    float spark = step(0.985, sh) * (1.0 - smoothstep(0.0, 0.28, length(fract(sp) - 0.5)))
                   * (0.5 + 0.5 * sin(iTime * 6.0 + sh * 90.0));
 
     vec3 add = c * a + P_glyph_b * spark * 0.8;

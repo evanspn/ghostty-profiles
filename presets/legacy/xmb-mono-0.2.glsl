@@ -1,9 +1,6 @@
 // Mono: grayscale XMB-style waves that take their color from one tint.
 // Ghostty custom shader (Shadertoy-style). Tunable per profile (see xmb-waves.glsl for how).
 //
-// @motion none
-// @coverage full
-// @float opacity 1.0 0.0 1.0 "Opacity"
 // @color tint #ffffff "Tint"
 // @float strength 0.12 0.0 0.5 "Strength"
 // @float speed 0.30 0.05 1.5 "Speed"
@@ -32,7 +29,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     }
     w *= smoothstep(0.0, 0.25, uv.y) * smoothstep(1.0, 0.7, uv.y);
 
-    // keep the effect behind the text: only plain background (see gp_textMask in the header) gets light
-    float textGuard = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float textGuard = 1.0 - smoothstep(0.35, 0.8, lum);
     fragColor = vec4(term.rgb + P_tint * w * P_strength * textGuard, term.a);
 }

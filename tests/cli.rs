@@ -340,3 +340,55 @@ fn shader_show_set_preset_and_reset_from_the_cli() {
             .contains("set strength")
     );
 }
+
+#[test]
+fn prune_use_and_opacity_from_the_cli() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path();
+    ok(BIN, home, &["install-presets"]);
+    let dir = home.join("config/ghostty-profiles/profiles/shd/shaders");
+    // browse-like clutter: a bundled shader's copy and a defaults-only params file
+    fs::write(dir.join("snow.glsl"), include_str!("../presets/shaders/snow.glsl")).unwrap();
+    fs::write(dir.join("snow.params"), "opacity = 0.6\n").unwrap();
+    fs::write(dir.join("mine.glsl"), "void mainImage(out vec4 c, in vec2 p) {}\n").unwrap();
+
+    let out = ok(BIN, home, &["prune", "shd", "--dry-run"]);
+    assert!(
+        out.contains("would remove shaders/snow.glsl") && out.contains("kept (yours") && out.contains("dry run"),
+        "{out}"
+    );
+    assert!(dir.join("snow.glsl").exists(), "a dry run deletes nothing");
+    let out = ok(BIN, home, &["prune"]);
+    assert!(
+        out.contains("removed shaders/snow.glsl") && out.contains("backup:") && out.contains("shaders/mine.glsl"),
+        "{out}"
+    );
+    assert!(!dir.join("snow.glsl").exists() && dir.join("mine.glsl").exists() && dir.join("xmb-waves.glsl").exists());
+    assert!(home.join("config/ghostty-profiles/backups/shd.bak-pre-prune/shaders/snow.glsl").is_file());
+    assert!(ok(BIN, home, &["prune"]).contains("nothing to tidy"));
+
+    // use: replaces the shader; the old one's files go
+    assert!(ok(BIN, home, &["shader", "use", "shd", "snow", "--no-reload"]).contains("now uses snow"));
+    assert!(dir.join("snow.glsl").exists() && !dir.join("xmb-waves.glsl").exists());
+    // changing values needs the shader to be the profile's one
+    let o = run(BIN, home, &["shader", "set", "shd", "xmb-waves", "strength", "0.2"]);
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("not the shader of 'shd'"));
+    assert!(
+        ok(BIN, home, &["shader", "set", "shd", "snow", "strength", "0.5", "--no-reload"]).contains("set strength")
+    );
+    assert!(dir.join("snow.params").exists());
+    ok(BIN, home, &["shader", "reset", "shd", "snow", "--no-reload"]);
+    assert!(!dir.join("snow.params").exists(), "defaults only: no sidecar");
+    // effects opacity
+    assert!(ok(BIN, home, &["shader", "opacity", "shd", "0.5", "--no-reload"]).contains("0.5"));
+    assert!(ok(BIN, home, &["shader", "show", "shd", "snow"]).contains("effects opacity (profile-wide): 0.5"));
+    assert!(!run(BIN, home, &["shader", "opacity", "shd", "2"]).status.success());
+    // none
+    assert!(ok(BIN, home, &["shader", "use", "shd", "none", "--no-reload"]).contains("no shader"));
+    assert!(!dir.join("snow.glsl").exists());
+    assert!(
+        !fs::read_to_string(home.join("config/ghostty-profiles/profiles/shd/profile.conf"))
+            .unwrap()
+            .contains("custom-shader")
+    );
+}

@@ -75,7 +75,7 @@ pub(crate) fn atomic_write(path: &Path, text: &str) -> Result<()> {
 }
 
 /// Recursive copy that skips symlinks (a shared profile must not be able to pull in other files).
-fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
     for e in fs::read_dir(src)? {
         let e = e?;
@@ -279,7 +279,20 @@ impl Store {
     }
 
     // ---- activation -------------------------------------------------------------
+    /// Clean a profile's shaders folder (see [`Profile::prune`]); the backup goes under `<app dir>/backups/`.
+    pub fn prune_profile(
+        &self,
+        name: &str,
+        dry_run: bool,
+        drop_orphan_params: bool,
+    ) -> Result<crate::profile::PruneReport> {
+        let mut prof = self.load(name)?;
+        prof.prune(dry_run, &self.paths.app_dir().join("backups"), drop_orphan_params)
+    }
+
     pub fn apply(&self, name: &str) -> Result<PathBuf> {
+        // a profile keeps one shader: tidy it up as it is applied (backed up first, user-written files kept)
+        self.prune_profile(name, false, false)?;
         let prof = self.load(name)?;
         prof.render_shaders()?;
         let conf = self.paths.active_conf();
@@ -711,8 +724,8 @@ mod tests {
         assert!(text.contains("const vec3 P_wave_a = vec3(1.000000, 0.419608, 0.101961);"), "the same ember as before");
         assert!(text.contains("const float P_strength = 0.160000;") && text.contains("void mainImage"));
         let st = p.shader_param_state(&shader_rel("xmb-waves")).unwrap();
-        assert_eq!(st.schema.params.len(), 4);
-        assert_eq!(st.values, vec!["#ff6b1a", "#e31a24", "0.16", "0.35"]);
+        assert_eq!(st.schema.params.len(), 5, "opacity first, then the colors and numbers");
+        assert_eq!(st.values, vec!["1", "#ff6b1a", "#e31a24", "0.16", "0.35"]);
         // every bundled preset profile's shaders are valid and rendered (no profile references a missing one)
         for n in presets::profile_names() {
             let p = s.load(&n).unwrap();
@@ -746,7 +759,7 @@ mod tests {
             side.contains("wave_a = #00ff80") && side.contains("strength = 0.3") && side.contains("wave_b = #e31a24"),
             "{side}"
         );
-        assert_eq!(p.shader_param_state(&rel).unwrap().values[0], "#00ff80");
+        assert_eq!(p.shader_param_state(&rel).unwrap().values[1], "#00ff80");
         // bad values are refused and change nothing
         let before = fs::read_to_string(p.dir.join(&rel)).unwrap();
         for (name, v) in [("wave_a", "zz"), ("strength", "9"), ("strength", "x"), ("nope", "1")] {
@@ -755,12 +768,12 @@ mod tests {
         assert_eq!(fs::read_to_string(p.dir.join(&rel)).unwrap(), before);
         // presets: their values over the defaults; unknown preset refused
         p.apply_shader_preset(&rel, "ocean").unwrap();
-        assert_eq!(p.shader_param_state(&rel).unwrap().values, vec!["#2fa8ff", "#4f5bff", "0.18", "0.35"]);
+        assert_eq!(p.shader_param_state(&rel).unwrap().values, vec!["1", "#2fa8ff", "#4f5bff", "0.18", "0.35"]);
         assert!(p.apply_shader_preset(&rel, "nope").is_err());
         // reset: back to the defaults, sidecar gone
         p.reset_shader_params(&rel).unwrap();
         assert!(!p.dir.join("shaders/xmb-waves.params").exists());
-        assert_eq!(p.shader_param_state(&rel).unwrap().values, vec!["#ff6b1a", "#e31a24", "0.16", "0.35"]);
+        assert_eq!(p.shader_param_state(&rel).unwrap().values, vec!["1", "#ff6b1a", "#e31a24", "0.16", "0.35"]);
         assert!(fs::read_to_string(p.dir.join(&rel)).unwrap().contains("P_wave_a = vec3(1.000000, 0.419608"));
         // a shader without parameters says so
         assert!(p.set_shader_params("shaders/nothing.glsl", &[("x".into(), "1".into())]).is_err());
@@ -817,6 +830,49 @@ mod tests {
     }
 
     #[test]
+    fn a_rendered_copy_from_the_previous_release_is_upgraded_and_a_customised_classic_gradient_keeps_its_look() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        // what a profile installed one release ago holds: the old shader WITH its generated header
+        let old = include_str!("../presets/legacy/xmb-waves-0.2.glsl");
+        let rendered_old = crate::shaderparams::render(old, &Default::default()).unwrap();
+        let file = s.profiles_dir().join("shd/shaders/xmb-waves.glsl");
+        fs::write(&file, &rendered_old).unwrap();
+        assert!(!rendered_old.contains("P_opacity"));
+        s.apply("shd").unwrap();
+        let now = fs::read_to_string(&file).unwrap();
+        assert!(
+            now.contains("P_opacity") && now.contains("gp_textMask"),
+            "upgraded to the version with opacity and the text mask"
+        );
+        assert!(s.load("shd").unwrap().shader_param_state("shaders/xmb-waves.glsl").is_some());
+
+        // xmb-classic: the gradient's two colors changed places to match their labels; a customised pair is carried
+        // over swapped so the screen looks the same
+        let mut p = s.load("ps3-classic").unwrap();
+        let old = include_str!("../presets/legacy/xmb-classic-0.2.glsl");
+        let file = p.dir.join("shaders/xmb-classic.glsl");
+        fs::write(&file, crate::shaderparams::render(old, &Default::default()).unwrap()).unwrap();
+        fs::write(p.dir.join("shaders/xmb-classic.params"), "bg_top = #111111\nbg_bottom = #222222\n").unwrap();
+        s.apply("ps3-classic").unwrap();
+        p = s.load("ps3-classic").unwrap();
+        let st = p.shader_param_state("shaders/xmb-classic.glsl").unwrap();
+        let get = |n: &str| st.values[st.schema.params.iter().position(|q| q.name == n).unwrap()].clone();
+        assert_eq!((get("bg_top"), get("bg_bottom")), ("#222222".to_string(), "#111111".to_string()));
+        // an edited copy of an older shader is never upgraded over the user's work
+        let edited = format!(
+            "{}\n// mine\n",
+            crate::shaderparams::render(include_str!("../presets/legacy/xmb-mono-0.2.glsl"), &Default::default())
+                .unwrap()
+        );
+        let q = s.load("mono-waves").unwrap();
+        fs::write(q.dir.join("shaders/xmb-mono.glsl"), &edited).unwrap();
+        s.apply("mono-waves").unwrap();
+        assert!(fs::read_to_string(q.dir.join("shaders/xmb-mono.glsl")).unwrap().contains("// mine"));
+    }
+
+    #[test]
     fn export_and_import_carry_the_values_and_a_hostile_sidecar_still_cannot_inject_code() {
         let sb = sandbox();
         let s = &sb.store;
@@ -833,7 +889,7 @@ mod tests {
         let (name, removed) = s.import_profile(&dest, Some("theirs")).unwrap();
         assert!(removed.is_empty(), "{removed:?}");
         let imported = s.load(&name).unwrap();
-        assert_eq!(imported.shader_param_state("shaders/xmb-waves.glsl").unwrap().values[0], "#12ab34");
+        assert_eq!(imported.shader_param_state("shaders/xmb-waves.glsl").unwrap().values[1], "#12ab34");
 
         // now a hostile one: command lines AND a sidecar full of attempts to smuggle GLSL
         let evil = sb._td.path().join("evil");
@@ -873,9 +929,9 @@ mod tests {
             .set_shader_params("shaders/xmb-waves.glsl", &[("wave_b".into(), "#101010".into())])
             .unwrap();
         s.new_profile("copy", Some("shd")).unwrap();
-        assert_eq!(s.load("copy").unwrap().shader_param_state("shaders/xmb-waves.glsl").unwrap().values[1], "#101010");
+        assert_eq!(s.load("copy").unwrap().shader_param_state("shaders/xmb-waves.glsl").unwrap().values[2], "#101010");
         s.rename("copy", "moved").unwrap();
-        assert_eq!(s.load("moved").unwrap().shader_param_state("shaders/xmb-waves.glsl").unwrap().values[1], "#101010");
+        assert_eq!(s.load("moved").unwrap().shader_param_state("shaders/xmb-waves.glsl").unwrap().values[2], "#101010");
     }
 
     #[test]
@@ -885,10 +941,296 @@ mod tests {
         let p = sb.store.load("aurora-glass").unwrap();
         assert_eq!(p.get("background-blur"), None, "no blur of whatever is behind the window");
         let shader = fs::read_to_string(p.dir.join("shaders/aurora.glsl")).unwrap();
+        let body = crate::shaderparams::strip_header(&shader);
         assert!(
-            !shader.contains("texture(iChannel0, uv +") && shader.matches("texture(").count() == 1,
-            "one sample of the pixel itself, no neighbours"
+            body.matches("texture(").count() == 1 && !body.contains("texture(iChannel0, uv +"),
+            "the shader itself samples only its own pixel (the mask in the generated header does the rest)"
         );
+    }
+
+    // ---- one shader per profile, and the tidy-up ----------------------------------------------
+
+    /// A folder like the one a real profile ended up with after browsing every shader: one active shader and
+    /// every bundled shader copied in beside it, plus parameter files.
+    fn ps3_like(sb: &Sandbox) -> PathBuf {
+        let s = &sb.store;
+        s.new_profile("ps3", None).unwrap();
+        let dir = s.profiles_dir().join("ps3");
+        fs::create_dir_all(dir.join("shaders")).unwrap();
+        for name in presets::shader_names() {
+            fs::write(dir.join("shaders").join(&name), presets::shader_source(&name).unwrap()).unwrap();
+        }
+        let mut p = s.load("ps3").unwrap();
+        p.set("custom-shader", "shaders/xmb-classic.glsl");
+        p.set("custom-shader-animation", "true");
+        p.save().unwrap();
+        p.render_shaders().unwrap(); // the active one has its generated header
+        p.set_shader_params("shaders/xmb-classic.glsl", &[("tint".into(), "0.5".into())]).unwrap(); // the operator's change
+        fs::write(dir.join("shaders/snow.params"), "opacity = 0.6\nstrength = 0.7\n").unwrap(); // defaults only
+        fs::write(dir.join("shaders/fireflies.params"), "strength = 0.2\n").unwrap(); // changed values, shader not in use
+        dir
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir.join("shaders"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn prune_leaves_a_ps3_like_folder_with_only_the_active_shader_and_what_the_user_changed() {
+        let sb = sandbox();
+        let s = &sb.store;
+        let dir = ps3_like(&sb);
+        assert!(names(&dir).len() >= 15, "{:?}", names(&dir));
+        // the user edited one bundled shader's copy, and wrote their own
+        let edited = format!("{}\n// my tweak\n", presets::shader_source("starfield.glsl").unwrap());
+        fs::write(dir.join("shaders/starfield.glsl"), &edited).unwrap();
+        fs::write(dir.join("shaders/mine.glsl"), "void mainImage(out vec4 c, in vec2 p) { c = vec4(0.0); }\n").unwrap();
+        let before = names(&dir);
+
+        // a dry run lists what would go, and changes nothing (not even a backup)
+        let r = s.prune_profile("ps3", true, false).unwrap();
+        assert!(r.removed.len() >= 12, "{r:?}");
+        assert_eq!(names(&dir), before, "a dry run deletes nothing");
+        assert!(!s.paths.app_dir().join("backups").exists(), "and makes no backup");
+
+        // for real: backed up once, then only the right things are left
+        let r = s.prune_profile("ps3", false, false).unwrap();
+        let after = names(&dir);
+        assert_eq!(
+            after,
+            vec!["fireflies.params", "mine.glsl", "starfield.glsl", "xmb-classic.glsl", "xmb-classic.params"],
+            "the active shader and its changed values, plus what the user wrote or changed: {after:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("shaders/starfield.glsl")).unwrap(),
+            edited,
+            "a user-edited shader survives untouched"
+        );
+        assert!(
+            r.kept_user.contains(&"shaders/mine.glsl".to_string())
+                && r.kept_user.contains(&"shaders/starfield.glsl".to_string()),
+            "{r:?}"
+        );
+        assert_eq!(
+            r.kept_params,
+            vec!["shaders/fireflies.params"],
+            "changed values for a shader that is not in use are kept, and reported"
+        );
+        let backup = r.backup.clone().expect("backed up before the first deletion");
+        assert!(backup.starts_with(s.paths.app_dir().join("backups")), "outside the profiles folder: {backup:?}");
+        assert!(
+            backup.join("shaders/snow.glsl").is_file() && backup.join("profile.conf").is_file(),
+            "the backup is the complete original"
+        );
+        assert!(!s.list_profiles().iter().any(|n| n.contains("bak")), "the backup is not listed as a profile");
+        // the active shader still works and still carries the operator's change
+        assert!(fs::read_to_string(dir.join("shaders/xmb-classic.glsl")).unwrap().contains("P_tint = 0.500000"));
+        assert!(s.load("ps3").unwrap().get("custom-shader-animation").is_some());
+
+        // idempotent: nothing more to do, no second backup
+        let again = s.prune_profile("ps3", false, false).unwrap();
+        assert!(again.is_empty() && again.backup.is_none(), "{again:?}");
+        assert_eq!(names(&dir), after);
+        // orphaned changed values go only when asked
+        let r = s.prune_profile("ps3", false, true).unwrap();
+        assert_eq!(r.removed, vec!["shaders/fireflies.params"]);
+    }
+
+    #[test]
+    fn prune_never_deletes_a_shader_it_cannot_prove_is_a_bundled_copy() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.new_profile("p", None).unwrap();
+        let dir = s.profiles_dir().join("p");
+        fs::create_dir_all(dir.join("shaders")).unwrap();
+        fs::write(
+            dir.join("shaders/aurora.glsl"),
+            "// aurora by someone else\nvoid mainImage(out vec4 c, in vec2 p) {}\n",
+        )
+        .unwrap();
+        fs::write(dir.join("shaders/notes.txt"), "keep me").unwrap();
+        fs::write(dir.join("shaders/weird.params"), "opacity = 0.3\n").unwrap();
+        fs::create_dir_all(dir.join("shaders/sub")).unwrap();
+        fs::write(dir.join("shaders/sub/x.glsl"), "x").unwrap();
+        let before = names(&dir);
+        let r = s.prune_profile("p", false, false).unwrap();
+        assert!(r.removed.is_empty(), "{r:?}");
+        assert_eq!(names(&dir), before);
+        assert!(
+            r.kept_user.contains(&"shaders/aurora.glsl".to_string()),
+            "a different file with a bundled name is the user's"
+        );
+        // an old release's untouched copy is recognised as generated and may go
+        fs::write(dir.join("shaders/snow.glsl"), include_str!("../presets/legacy/snow-0.2.glsl")).unwrap();
+        let r = s.prune_profile("p", false, false).unwrap();
+        assert_eq!(r.removed, vec!["shaders/snow.glsl"]);
+    }
+
+    #[test]
+    fn a_profile_with_several_shader_lines_keeps_the_first_and_says_which() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.new_profile("multi", None).unwrap();
+        let dir = s.profiles_dir().join("multi");
+        fs::create_dir_all(dir.join("shaders")).unwrap();
+        for n in ["aurora.glsl", "snow.glsl", "crt-scanlines.glsl"] {
+            fs::write(dir.join("shaders").join(n), presets::shader_source(n).unwrap()).unwrap();
+        }
+        let mut p = s.load("multi").unwrap();
+        p.set_all(
+            "custom-shader",
+            &["shaders/snow.glsl".into(), "shaders/aurora.glsl".into(), "shaders/crt-scanlines.glsl".into()],
+        );
+        p.save().unwrap();
+        let r = s.prune_profile("multi", false, false).unwrap();
+        assert_eq!(r.dropped_extra_lines, vec!["shaders/aurora.glsl", "shaders/crt-scanlines.glsl"]);
+        let conf = fs::read_to_string(dir.join("profile.conf")).unwrap();
+        assert_eq!(conf.matches("custom-shader = ").count(), 1, "{conf}");
+        assert!(conf.contains("custom-shader = shaders/snow.glsl"), "the first one stays");
+        assert_eq!(names(&dir), vec!["snow.glsl"]);
+        assert!(crate::tui::app::prune_message("multi", &r).contains("kept only the first shader"));
+    }
+
+    #[test]
+    fn apply_tidies_the_profile_and_rendering_is_unchanged_for_the_active_shader() {
+        let sb = sandbox();
+        let s = &sb.store;
+        let dir = ps3_like(&sb);
+        s.apply("ps3").unwrap();
+        assert!(!names(&dir).contains(&"snow.glsl".to_string()), "{:?}", names(&dir));
+        let active = fs::read_to_string(s.paths.active_conf()).unwrap();
+        assert!(active.contains("shaders/xmb-classic.glsl"));
+        assert!(s.paths.app_dir().join("backups/ps3.bak-pre-prune").is_dir());
+    }
+
+    #[test]
+    fn use_shader_replaces_and_a_defaults_only_sidecar_is_never_kept() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        let mut p = s.load("shd").unwrap();
+        assert_eq!(names(&p.dir), vec!["xmb-waves.glsl"], "an installed preset holds just its shader");
+        p.set_shader_params("shaders/xmb-waves.glsl", &[("strength".into(), "0.3".into())]).unwrap();
+        assert!(p.dir.join("shaders/xmb-waves.params").is_file());
+        // change it back to the default: the sidecar goes
+        p.set_shader_params("shaders/xmb-waves.glsl", &[("strength".into(), "0.16".into())]).unwrap();
+        assert!(!p.dir.join("shaders/xmb-waves.params").exists());
+        // switching shader removes the old rendered copy and its sidecar
+        p.set_shader_params("shaders/xmb-waves.glsl", &[("strength".into(), "0.3".into())]).unwrap();
+        p.use_shader("snow.glsl").unwrap();
+        p.save().unwrap();
+        assert_eq!(names(&p.dir), vec!["snow.glsl"], "the old shader and its parameters are gone: {:?}", names(&p.dir));
+        assert_eq!(p.shaders(), vec!["shaders/snow.glsl"]);
+        // a preset whose values are the defaults leaves no sidecar; another preset does
+        p.apply_shader_preset("shaders/snow.glsl", "snowfall").unwrap();
+        assert!(!p.dir.join("shaders/snow.params").exists());
+        p.apply_shader_preset("shaders/snow.glsl", "blizzard").unwrap();
+        assert!(p.dir.join("shaders/snow.params").is_file());
+        // none removes everything
+        p.clear_shader().unwrap();
+        p.save().unwrap();
+        assert!(names(&p.dir).is_empty());
+        assert!(p.get("custom-shader-animation").is_none() && p.shaders().is_empty());
+        // a user's own shader is not removed when another one is selected
+        fs::write(p.dir.join("shaders/mine.glsl"), "void mainImage(out vec4 c, in vec2 p) {}\n").unwrap();
+        p.use_shader("mine.glsl").unwrap();
+        p.use_shader("fireflies.glsl").unwrap();
+        assert!(p.dir.join("shaders/mine.glsl").exists(), "something the user wrote is never deleted");
+        assert!(p.use_shader("../evil.glsl").is_err() && p.use_shader("nope.glsl").is_err());
+    }
+
+    #[test]
+    fn export_carries_only_the_active_shader() {
+        let sb = sandbox();
+        let s = &sb.store;
+        let dir = ps3_like(&sb);
+        s.apply("ps3").unwrap(); // tidies
+        let dest = sb._td.path().join("shared");
+        let notes = s.load("ps3").unwrap().export(&dest, false, false).unwrap();
+        let mut got: Vec<String> = fs::read_dir(dest.join("shaders"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        got.sort();
+        assert_eq!(got, vec!["xmb-classic.glsl", "xmb-classic.params"], "{got:?} {notes:?}");
+        let _ = dir;
+    }
+
+    #[test]
+    fn the_effects_opacity_is_profile_wide_validated_and_travels_with_the_profile() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        let p = s.load("shd").unwrap();
+        assert_eq!(p.effects_opacity(), 1.0);
+        p.set_effects_opacity(0.5).unwrap();
+        assert_eq!(p.effects_opacity(), 0.5);
+        let shader = fs::read_to_string(p.dir.join("shaders/xmb-waves.glsl")).unwrap();
+        assert!(shader.contains("P_opacity = 0.500000"), "the shader's own 1.0 times the master 0.5");
+        for bad in [-0.1, 1.5, f64::NAN, f64::INFINITY] {
+            assert!(p.set_effects_opacity(bad).is_err(), "{bad}");
+        }
+        assert_eq!(p.effects_opacity(), 0.5);
+        // a hand-edited file with nonsense is ignored
+        fs::write(p.dir.join("effects.params"), "opacity = 7\n").unwrap();
+        assert_eq!(p.effects_opacity(), 1.0);
+        fs::write(p.dir.join("effects.params"), "opacity = 0.5\n").unwrap();
+        // it travels: export, copy, rename
+        let dest = sb._td.path().join("out");
+        p.export(&dest, false, false).unwrap();
+        assert!(fs::read_to_string(dest.join("effects.params")).unwrap().contains("opacity = 0.5"));
+        s.new_profile("c", Some("shd")).unwrap();
+        assert_eq!(s.load("c").unwrap().effects_opacity(), 0.5);
+        // 1 removes the file again
+        p.set_effects_opacity(1.0).unwrap();
+        assert!(!p.dir.join("effects.params").exists());
+    }
+
+    #[test]
+    fn shaders_are_told_the_profiles_background_so_effects_stay_behind_the_text() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        let mut p = s.load("shd").unwrap();
+        let c = p.render_context();
+        assert_eq!(c.background, (0x2c, 0x2c, 0x2c));
+        assert!(!c.background_image);
+        let shader = fs::read_to_string(p.dir.join("shaders/xmb-waves.glsl")).unwrap();
+        assert!(
+            shader.contains("const vec3 P_bg = vec3(0.172549, 0.172549, 0.172549);")
+                && shader.contains("P_bg_image = 0.0"),
+            "{}",
+            &shader[..600]
+        );
+        // an edit of the background shows up in the header the next time it is rendered
+        p.set("background", "#102030");
+        p.save().unwrap();
+        s.apply("shd").unwrap();
+        assert!(
+            fs::read_to_string(p.dir.join("shaders/xmb-waves.glsl"))
+                .unwrap()
+                .contains("P_bg = vec3(0.062745, 0.125490, 0.188235)")
+        );
+        // a background image switches the shaders to their picture-friendly mask
+        p.set("background-image", "images/x.png");
+        p.save().unwrap();
+        assert!(p.render_context().background_image);
+        s.apply("shd").unwrap();
+        assert!(fs::read_to_string(p.dir.join("shaders/xmb-waves.glsl")).unwrap().contains("P_bg_image = 1.0"));
+        // a theme by name is resolved from the bundled themes; no background at all falls back to Ghostty's default
+        let mut q = s.load("calm-dark").unwrap();
+        q.remove("background");
+        q.set("theme", "Dracula");
+        assert_eq!(q.render_context().background, (0x28, 0x2a, 0x36), "Dracula's background");
+        q.remove("theme");
+        assert_eq!(q.render_context().background, crate::shaderparams::DEFAULT_BACKGROUND);
     }
 
     #[test]

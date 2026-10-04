@@ -4,9 +4,6 @@
 // The optional text glow samples neighbouring pixels, which softens text, so it is OFF by default
 // and costs nothing while it is off.
 //
-// @motion none
-// @coverage full
-// @float opacity 1.0 0.0 1.0 "Opacity"
 // @float vignette 0.28 0.0 0.6 "Vignette"
 // @float bloom 0.0 0.0 0.3 "Text glow (softens text)"
 // @preset vignette vignette=0.28 bloom=0.0
@@ -30,8 +27,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         rgb += max(blur - term.rgb, 0.0) * P_bloom * 6.0;
     }
 
-    // the vignette darkens plain background only: text (and the cursor and selections) keep their pixels
     vec2 c = uv - 0.5;
-    float vig = 1.0 - P_vignette * smoothstep(0.25, 0.75, length(c)) * (1.0 - gp_textMask(fragCoord, term));
+    float vig = 1.0 - P_vignette * smoothstep(0.25, 0.75, length(c));
     fragColor = vec4(rgb * vig, term.a);
 }

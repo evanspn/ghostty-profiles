@@ -44,6 +44,17 @@ enum Cmd {
         #[command(subcommand)]
         action: ShaderCmd,
     },
+    /// Tidy profile folders: a profile keeps ONE shader, so unused generated shader files go (backed up first)
+    Prune {
+        /// Only this profile (default: all)
+        profile: Option<String>,
+        /// Show what would be removed, change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Also remove parameter files with changed values that belong to shaders that are not the profile's shader
+        #[arg(long)]
+        drop_orphan_params: bool,
+    },
     /// Rename a profile (its images and shaders move with it; the active profile stays active)
     Rename {
         old: String,
@@ -103,6 +114,21 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ShaderCmd {
+    /// Make SHADER the profile's one shader (replacing the current one); `none` removes it
+    Use {
+        profile: String,
+        /// A bundled shader name, a shader file in the profile, or `none`
+        shader: String,
+        #[arg(long)]
+        no_reload: bool,
+    },
+    /// Set the profile-wide effects opacity (0..1), which multiplies the shader's own opacity
+    Opacity {
+        profile: String,
+        value: f64,
+        #[arg(long)]
+        no_reload: bool,
+    },
     /// Show a shader's parameters and current values
     Show { profile: String, shader: String },
     /// Set one parameter, e.g. `gpf shader set shd xmb-waves wave_a '#2fa8ff'`
@@ -176,6 +202,51 @@ fn run(cli: Cli) -> Result<()> {
             println!("created '{}' in {}", p.name, p.dir.display());
         }
         Cmd::Shader { action } => shader_cmd(&store, action)?,
+        Cmd::Prune { profile, dry_run, drop_orphan_params } => {
+            let names = match profile {
+                Some(p) => vec![p],
+                None => store.list_profiles(),
+            };
+            let mut total = 0;
+            for name in names {
+                let r = store.prune_profile(&name, dry_run, drop_orphan_params)?;
+                if r.is_empty() && r.kept_user.is_empty() && r.kept_params.is_empty() {
+                    continue;
+                }
+                println!("{name}:");
+                for f in &r.removed {
+                    println!("  {} {f}", if dry_run { "would remove" } else { "removed" });
+                }
+                for f in &r.dropped_extra_lines {
+                    println!(
+                        "  {} extra custom-shader line: {f} (a profile keeps one shader; the first stays)",
+                        if dry_run { "would drop" } else { "dropped" }
+                    );
+                }
+                for f in &r.kept_user {
+                    println!("  kept (yours, not a copy of a bundled shader): {f}");
+                }
+                for f in &r.kept_params {
+                    println!(
+                        "  kept (changed values for a shader that is not in use): {f}  (--drop-orphan-params removes these)"
+                    );
+                }
+                if let Some(b) = &r.backup {
+                    println!("  backup: {}", b.display());
+                }
+                total += r.removed.len();
+            }
+            println!(
+                "{}",
+                if total == 0 {
+                    "nothing to tidy"
+                } else if dry_run {
+                    "dry run: nothing was changed"
+                } else {
+                    "done"
+                }
+            );
+        }
         Cmd::Rename { old, new, no_reload } => {
             let was_active = store.rename(&old, &new)?;
             println!("renamed '{old}' to '{new}'");
@@ -282,13 +353,43 @@ fn shader_cmd(store: &Store, action: ShaderCmd) -> Result<()> {
         }
         Ok(())
     };
+    // changing a shader's values only makes sense for the profile's one active shader
+    let require_active = |store: &Store, profile: &str, shader: &str| -> Result<()> {
+        let p = store.load(profile)?;
+        if p.active_shader().as_deref() != Some(shader_rel(shader).as_str()) {
+            bail!(
+                "'{shader}' is not the shader of '{profile}' (it uses {}); choose it first with `gpf shader use {profile} {shader}`",
+                p.active_shader().unwrap_or_else(|| "no shader".into())
+            );
+        }
+        Ok(())
+    };
     match action {
+        ShaderCmd::Use { profile, shader, no_reload } => {
+            let mut p = store.load(&profile)?;
+            if shader == "none" {
+                p.clear_shader()?;
+            } else {
+                p.use_shader(&format!("{}.glsl", shader.strip_suffix(".glsl").unwrap_or(&shader)))?;
+            }
+            p.save()?;
+            println!("'{profile}' now uses {}", if shader == "none" { "no shader".to_string() } else { shader });
+            reload_if_active(store, &profile, no_reload)?;
+        }
+        ShaderCmd::Opacity { profile, value, no_reload } => {
+            store.load(&profile)?.set_effects_opacity(value)?;
+            println!("effects opacity of '{profile}' is now {}", crate::shaderparams::format_number(value));
+            reload_if_active(store, &profile, no_reload)?;
+        }
         ShaderCmd::Show { profile, shader } => {
+            require_active(store, &profile, &shader)?;
             let p = store.load(&profile)?;
             let rel = shader_rel(&shader);
-            let Some(st) = p.shader_param_state(&rel) else {
-                bail!("'{shader}' is not enabled in '{profile}' or has no tunable parameters")
-            };
+            let Some(st) = p.shader_param_state(&rel) else { bail!("'{shader}' has no tunable parameters") };
+            if let Some(m) = st.schema.motion {
+                println!("motion: {}{}", m.name(), if st.schema.coverage_full { " (spans the screen)" } else { "" });
+            }
+            println!("effects opacity (profile-wide): {}", crate::shaderparams::format_number(p.effects_opacity()));
             for (param, value) in st.schema.params.iter().zip(&st.values) {
                 println!("{:<14} {value:<9} {}", param.name, param.label);
             }
@@ -300,16 +401,19 @@ fn shader_cmd(store: &Store, action: ShaderCmd) -> Result<()> {
             }
         }
         ShaderCmd::Set { profile, shader, name, value, no_reload } => {
+            require_active(store, &profile, &shader)?;
             store.load(&profile)?.set_shader_params(&shader_rel(&shader), &[(name.clone(), value)])?;
             println!("set {name} on {shader} in '{profile}'");
             reload_if_active(store, &profile, no_reload)?;
         }
         ShaderCmd::Preset { profile, shader, preset, no_reload } => {
+            require_active(store, &profile, &shader)?;
             store.load(&profile)?.apply_shader_preset(&shader_rel(&shader), &preset)?;
             println!("applied preset '{preset}' to {shader} in '{profile}'");
             reload_if_active(store, &profile, no_reload)?;
         }
         ShaderCmd::Reset { profile, shader, no_reload } => {
+            require_active(store, &profile, &shader)?;
             store.load(&profile)?.reset_shader_params(&shader_rel(&shader))?;
             println!("reset {shader} in '{profile}' to its defaults");
             reload_if_active(store, &profile, no_reload)?;

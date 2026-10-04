@@ -1,26 +1,20 @@
-// Pixel rain: chunky, blocky rain streaks falling DOWN at a slight angle, with little splash pixels along
+// Pixel rain: chunky, blocky rain streaks falling at a slight angle, with little splash pixels along
 // the bottom and an optional thunder flash (off by default). Original code.
-// Only plain-background pixels are touched (text of any color, cursors and selections stay exactly as drawn) and nothing samples
+// Only dark background pixels are touched (text stays exactly as drawn) and nothing samples
 // neighbouring pixels. Ghostty custom shader (Shadertoy-style). Tunable per profile.
 //
-// ORIENTATION: Ghostty's fragCoord has its origin at the TOP-left, so y grows DOWNWARD on screen (unlike
-// Shadertoy). This shader computes in y-UP coordinates through gp_yup() (generated into the header): up = +y,
-// so FALLING = -y = down the screen (rain falls on purpose).
-//
-// @motion down
-// @float opacity 0.6 0.0 1.0 "Opacity"
 // @color rain #4aa3ff "Rain color"
 // @color splash #bfe3ff "Splash color"
 // @float strength 0.70 0.0 1.0 "Strength"
 // @float speed 0.90 0.1 3.0 "Speed"
 // @float pixel 6 3 16 "Pixel size (px)"
 // @float slant 0.25 -0.6 0.6 "Slant"
-// @float density 0.10 0.03 0.9 "Density"
+// @float density 0.35 0.05 0.9 "Density"
 // @float thunder 0.0 0.0 1.0 "Thunder flash (0 = off)"
-// @preset drizzle rain=#4aa3ff splash=#bfe3ff strength=0.60 speed=0.60 density=0.05 thunder=0
-// @preset rain rain=#4aa3ff splash=#bfe3ff strength=0.70 speed=0.90 density=0.10 thunder=0
-// @preset storm rain=#3d7dff splash=#d6ecff strength=0.80 speed=1.60 density=0.22 thunder=0.5
-// @preset night rain=#6b6bff splash=#c8c8ff strength=0.60 speed=0.90 density=0.10 thunder=0
+// @preset drizzle rain=#4aa3ff splash=#bfe3ff strength=0.60 speed=0.60 density=0.20 thunder=0
+// @preset rain rain=#4aa3ff splash=#bfe3ff strength=0.70 speed=0.90 density=0.35 thunder=0
+// @preset storm rain=#3d7dff splash=#d6ecff strength=0.80 speed=1.60 density=0.60 thunder=0.5
+// @preset night rain=#6b6bff splash=#c8c8ff strength=0.60 speed=0.90 density=0.35 thunder=0
 
 float hash21(vec2 p) {
     p = fract(p * vec2(0.3183099, 0.3678794));
@@ -31,17 +25,15 @@ float hash21(vec2 p) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec4 term = texture(iChannel0, uv);
-    // 1.0 only on plain terminal background: text of any color, the cursor, selections and a thin fringe
-    // around them are masked out (gp_textMask is generated into the header)
-    float bgMask = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float bgMask = 1.0 - smoothstep(0.30, 0.60, lum);
     if (P_strength <= 0.0001 || bgMask <= 0.001) {
         fragColor = term;
         return;
     }
 
     // everything below is computed per chunky pixel, so the rain looks blocky
-    vec2 fc = gp_yup(fragCoord);
-    vec2 px = floor(fc / P_pixel);
+    vec2 px = floor(fragCoord / P_pixel);
     vec2 grid = floor(iResolution.xy / P_pixel);
     float xs = floor(px.x + px.y * P_slant);
     float h = hash21(vec2(xs, 1.0));
@@ -49,8 +41,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float cellsPerSec = (6.0 + 10.0 * h) * P_speed;
     float period = grid.y + 20.0 + h * 30.0;
     float head = mod(iTime * cellsPerSec + h * period, period);
-    float y = grid.y - px.y;             // rows from the top of the window
-    float d = head - y;                  // how far behind the head this pixel is (the head moves DOWN)
+    float y = grid.y - px.y;             // rows from the top
+    float d = head - y;                  // how far behind the head this pixel is
     float len = 5.0 + floor(h * 9.0);
     float streak = on * step(0.0, d) * step(d, len) * (1.0 - d / len);
     streak = floor(streak * 3.0 + 0.5) / 3.0;   // three chunky brightness steps

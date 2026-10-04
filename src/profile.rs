@@ -55,8 +55,32 @@ pub fn sidecar_rel(shader_rel: &str) -> String {
     }
 }
 
+/// The profile-wide "effects opacity": multiplies each enabled shader's own opacity. Plain `opacity = 0.5`.
+pub const EFFECTS_FILE: &str = "effects.params";
+
 /// Largest shader or sidecar file read (a sanity limit against a shared profile with a huge file).
 const MAX_SHADER_BYTES: u64 = 1_000_000;
+
+/// What [`Profile::prune`] found (and, unless it was a dry run, did).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Files removed (or that would be): generated copies of bundled shaders, parameter files holding only defaults.
+    pub removed: Vec<String>,
+    /// Shader files the user wrote, kept (and listed as "Your shaders").
+    pub kept_user: Vec<String>,
+    /// Parameter files with changed values for a shader that is not the active one, kept.
+    pub kept_params: Vec<String>,
+    /// Extra `custom-shader` lines that were dropped (a profile keeps one shader; the first stays).
+    pub dropped_extra_lines: Vec<String>,
+    /// Where the profile folder was backed up before the first deletion.
+    pub backup: Option<PathBuf>,
+}
+
+impl PruneReport {
+    pub fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.dropped_extra_lines.is_empty()
+    }
+}
 
 /// A tunable shader as the TUI shows it: its declared parameters and their current values.
 #[derive(Clone, Debug)]
@@ -279,6 +303,64 @@ impl Profile {
         shaderparams::parse_values(&fs::read_to_string(path).unwrap_or_default())
     }
 
+    /// What the shaders' generated headers are told about this profile: the effects opacity, the terminal's
+    /// background color (so effects can stay behind the text) and whether a background image is in use.
+    pub fn render_context(&self) -> shaderparams::RenderContext {
+        let mut background = self.color("background");
+        if background.is_none()
+            && let Some(theme) = self.get("theme")
+        {
+            let name = unquote(&theme).to_string();
+            background = crate::presets::bundled_themes()
+                .find(|(n, _)| *n == name)
+                .and_then(|(_, text)| crate::ghostty::theme_colors(text).background);
+        }
+        shaderparams::RenderContext {
+            opacity_scale: self.effects_opacity(),
+            background: background.as_deref().and_then(hex_rgb).unwrap_or(shaderparams::DEFAULT_BACKGROUND),
+            background_image: self.image().is_some_and(|v| !unquote(&v).is_empty()),
+        }
+    }
+
+    /// The profile's master effects opacity, 0..1 (1 when unset or invalid).
+    pub fn effects_opacity(&self) -> f64 {
+        let path = self.dir.join(EFFECTS_FILE);
+        let ok = fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= 4096);
+        if !ok {
+            return 1.0;
+        }
+        shaderparams::parse_values(&fs::read_to_string(path).unwrap_or_default())
+            .get("opacity")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            .unwrap_or(1.0)
+    }
+
+    /// Set the master effects opacity (0..1) and regenerate every shader copy.
+    pub fn set_effects_opacity(&self, value: f64) -> Result<()> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            bail!("effects opacity must be between 0 and 1");
+        }
+        let path = self.dir.join(EFFECTS_FILE);
+        if (value - 1.0).abs() < 1e-9 {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            crate::store::atomic_write(
+                &path,
+                &format!(
+                    "# Effects opacity for every shader in this profile (0..1).\nopacity = {}\n",
+                    shaderparams::format_number(value)
+                ),
+            )?;
+        }
+        self.render_shaders()?;
+        Ok(())
+    }
+
     /// The tunable parameters of shader `rel` and their current values; `None` if it has none.
     pub fn shader_param_state(&self, rel: &str) -> Option<ParamState> {
         let (_, text) = self.read_shader(rel)?;
@@ -309,10 +391,24 @@ impl Profile {
         let Some((path, text)) = self.read_shader(rel) else { return Ok(None) };
         let file_name =
             Path::new(unquote(rel)).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let current = crate::presets::upgrade_legacy_shader(&file_name, &text)
-            .map(str::to_string)
-            .unwrap_or_else(|| text.clone());
-        match shaderparams::render(&current, &self.read_sidecar(rel)) {
+        // an untouched copy of an older release (compared WITHOUT its generated header) is upgraded
+        let upgraded = crate::presets::upgrade_legacy_shader(&file_name, shaderparams::strip_header(&text));
+        let mut values = self.read_sidecar(rel);
+        if upgraded.is_some() && file_name == "xmb-classic.glsl" && !values.is_empty() {
+            // the gradient's two colors were swapped to match their labels (the default look is unchanged):
+            // carry a customised pair over so it looks the same
+            let (top, bottom) = (values.remove("bg_top"), values.remove("bg_bottom"));
+            if let Some(v) = top {
+                values.insert("bg_bottom".into(), v);
+            }
+            if let Some(v) = bottom {
+                values.insert("bg_top".into(), v);
+            }
+            let text: String = values.iter().map(|(k, v)| format!("{k} = {v}\n")).collect();
+            crate::store::atomic_write(&self.dir.join(sidecar_rel(unquote(rel))), &text)?;
+        }
+        let current = upgraded.map(str::to_string).unwrap_or_else(|| text.clone());
+        match shaderparams::render_ctx(&current, &values, &self.render_context()) {
             Ok(out) => {
                 if out != text {
                     crate::store::atomic_write(&path, &out)?;
@@ -336,12 +432,24 @@ impl Profile {
                 .with_context(|| format!("{rel} has no parameter '{name}'"))?;
             values[i] = shaderparams::validate_value(&state.schema.params[i], text).map_err(anyhow::Error::msg)?;
         }
-        crate::store::atomic_write(
-            &self.dir.join(sidecar_rel(unquote(rel))),
-            &shaderparams::format_values(&state.schema, &values),
-        )?;
+        self.write_sidecar(rel, &state.schema, &values)?;
         self.render_shader(rel)?;
         Ok(())
+    }
+
+    /// Save the parameter values, but only when they differ from the defaults: a shader that is just in its default
+    /// state needs no sidecar, so none is kept (and an existing one is removed).
+    fn write_sidecar(&self, rel: &str, schema: &Schema, values: &[String]) -> Result<()> {
+        let path = self.dir.join(sidecar_rel(unquote(rel)));
+        let is_default = schema.params.iter().zip(values).all(|(p, v)| *v == p.default);
+        if is_default {
+            return match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            };
+        }
+        crate::store::atomic_write(&path, &shaderparams::format_values(schema, values))
     }
 
     /// Apply a named preset of the shader's: its values over the defaults.
@@ -354,10 +462,7 @@ impl Profile {
             .find(|p| p.name == preset)
             .with_context(|| format!("{rel} has no preset '{preset}'"))?;
         let values = shaderparams::preset_values(&state.schema, p);
-        crate::store::atomic_write(
-            &self.dir.join(sidecar_rel(unquote(rel))),
-            &shaderparams::format_values(&state.schema, &values),
-        )?;
+        self.write_sidecar(rel, &state.schema, &values)?;
         self.render_shader(rel)?;
         Ok(())
     }
@@ -372,6 +477,165 @@ impl Profile {
         }
         self.render_shader(rel)?;
         Ok(())
+    }
+
+    // ---- the one active shader ----------------------------------------------------------
+    /// A profile has at most ONE active shader. This is it (`shaders/x.glsl`), the first `custom-shader` line.
+    pub fn active_shader(&self) -> Option<String> {
+        self.shaders().into_iter().next()
+    }
+
+    fn shader_file_name(rel: &str) -> String {
+        Path::new(unquote(rel)).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// Is the profile's file `rel` a generated copy of a bundled shader (as opposed to something the user wrote)?
+    fn is_generated_shader(&self, rel: &str) -> bool {
+        let Some((_, text)) = self.read_shader(rel) else { return false };
+        crate::presets::is_known_shader_body(&Self::shader_file_name(rel), shaderparams::strip_header(&text))
+    }
+
+    /// Remove the generated files of shader `rel` (its rendered copy and its parameter sidecar). A shader the
+    /// user wrote is never deleted.
+    fn discard_generated(&self, rel: &str) -> Result<()> {
+        if !is_contained_relative(rel) || !self.is_generated_shader(rel) {
+            return Ok(());
+        }
+        for f in [unquote(rel).to_string(), sidecar_rel(unquote(rel))] {
+            match fs::remove_file(self.dir.join(f)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Make `file_name` (a bundled shader, or a file already in `shaders/`) THE shader of this profile. It replaces
+    /// any other one: the previous shader's generated files are removed. A bundled shader is copied in only now.
+    pub fn use_shader(&mut self, file_name: &str) -> Result<()> {
+        if file_name.is_empty() || file_name.contains('/') || file_name.contains('\\') || file_name.starts_with('.') {
+            bail!("'{file_name}' is not a shader file name");
+        }
+        let rel = format!("shaders/{file_name}");
+        for old in self.shaders() {
+            if old != rel {
+                self.discard_generated(&old)?;
+            }
+        }
+        let path = self.dir.join(&rel);
+        if !path.exists() {
+            let src =
+                crate::presets::shader_source(file_name).with_context(|| format!("no shader named '{file_name}'"))?;
+            crate::store::atomic_write(&path, src)?;
+        }
+        self.set_shaders(std::slice::from_ref(&rel));
+        let animated = fs::read_to_string(&path).is_ok_and(|s| s.contains("iTime"));
+        if animated && self.get("custom-shader-animation").is_none() {
+            self.set("custom-shader-animation", "true");
+        }
+        self.render_shaders()?;
+        Ok(())
+    }
+
+    /// No shader: the line and the animation flag go, and so do the generated files.
+    pub fn clear_shader(&mut self) -> Result<()> {
+        for old in self.shaders() {
+            self.discard_generated(&old)?;
+        }
+        self.set_shaders(&[]);
+        Ok(())
+    }
+
+    /// Shader files in the profile folder that the user wrote (not generated copies of bundled shaders).
+    pub fn user_shaders(&self) -> Vec<String> {
+        let Ok(rd) = fs::read_dir(self.dir.join("shaders")) else { return Vec::new() };
+        let mut v: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|x| x == "glsl"))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !self.is_generated_shader(&format!("shaders/{n}")))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Clean up the shaders folder (see [`PruneReport`]). A profile keeps one shader: extra `custom-shader`
+    /// lines are dropped (the first stays), and shader files that are generated copies of bundled shaders
+    /// (or parameter files holding only defaults) and are not the active one are removed. Anything the user
+    /// wrote or changed is kept. The profile folder is backed up into `backup_root` once before anything is deleted.
+    pub fn prune(&mut self, dry_run: bool, backup_root: &Path, drop_orphan_params: bool) -> Result<PruneReport> {
+        let mut report = PruneReport::default();
+        let shaders = self.shaders();
+        if shaders.len() > 1 {
+            report.dropped_extra_lines = shaders[1..].to_vec();
+        }
+        let active = shaders.first().cloned();
+        let active_file = active.as_deref().map(Self::shader_file_name);
+        let mut remove: Vec<PathBuf> = Vec::new();
+        if let Ok(rd) = fs::read_dir(self.dir.join("shaders")) {
+            let mut files: Vec<_> = rd.flatten().filter(|e| e.path().is_file()).collect();
+            files.sort_by_key(|e| e.file_name());
+            for e in files {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let rel = format!("shaders/{name}");
+                if active_file.as_deref() == Some(name.as_str()) {
+                    continue;
+                }
+                if name.ends_with(".glsl") {
+                    if self.is_generated_shader(&rel) {
+                        remove.push(e.path());
+                        report.removed.push(rel);
+                    } else {
+                        report.kept_user.push(rel);
+                    }
+                } else if let Some(stem) = name.strip_suffix(".params") {
+                    let is_active = active_file.as_deref().is_some_and(|a| a.trim_end_matches(".glsl") == stem);
+                    let values =
+                        fs::read_to_string(e.path()).map(|t| shaderparams::parse_values(&t)).unwrap_or_default();
+                    // defaults only? compare with the shader's schema: its profile copy, else the bundled source
+                    let src = self
+                        .read_shader(&format!("shaders/{stem}.glsl"))
+                        .map(|(_, t)| t)
+                        .or_else(|| crate::presets::shader_source(&format!("{stem}.glsl")).map(str::to_string));
+                    let all_default = match src
+                        .as_deref()
+                        .map(shaderparams::strip_header)
+                        .and_then(|b| shaderparams::parse_schema(b).ok())
+                    {
+                        Some(schema) => schema
+                            .params
+                            .iter()
+                            .zip(shaderparams::resolve(&schema, &values))
+                            .all(|(p, v)| v == p.default),
+                        None => values.is_empty(),
+                    };
+                    if all_default || (!is_active && drop_orphan_params) {
+                        remove.push(e.path());
+                        report.removed.push(rel);
+                    } else if !is_active {
+                        report.kept_params.push(rel);
+                    }
+                }
+            }
+        }
+        if dry_run || (remove.is_empty() && report.dropped_extra_lines.is_empty()) {
+            return Ok(report);
+        }
+        let backup = backup_root.join(format!("{}.bak-pre-prune", self.name));
+        if !backup.exists() {
+            fs::create_dir_all(backup_root)?;
+            crate::store::copy_dir(&self.dir, &backup)?;
+            report.backup = Some(backup);
+        }
+        for f in remove {
+            fs::remove_file(f)?;
+        }
+        if !report.dropped_extra_lines.is_empty() {
+            self.set_shaders(&shaders[..1]);
+            self.save()?;
+        }
+        Ok(report)
     }
 
     pub fn set_shaders(&mut self, rel_paths: &[String]) {
@@ -463,6 +727,10 @@ impl Profile {
             } else {
                 copy.lines.push(l.clone());
             }
+        }
+        let effects = self.dir.join(EFFECTS_FILE);
+        if fs::metadata(&effects).is_ok_and(|m| m.is_file() && m.len() <= 4096) {
+            fs::copy(&effects, dest.join(EFFECTS_FILE))?;
         }
         copy.save()?;
         Ok(notes)

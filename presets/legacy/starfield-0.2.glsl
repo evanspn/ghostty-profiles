@@ -1,21 +1,17 @@
-// Starfield: three layers of stars drifting sideways (LEFT) at different speeds (parallax), with an optional
+// Starfield: three layers of stars drifting sideways at different speeds (parallax), with an optional
 // warp that stretches them into streaks. Original code.
-// Only plain-background pixels are touched (text of any color, cursors and selections stay exactly as drawn) and nothing samples
+// Only dark background pixels are touched (text stays exactly as drawn) and nothing samples
 // neighbouring pixels. Ghostty custom shader (Shadertoy-style). Tunable per profile.
 //
-// ORIENTATION: horizontal motion is the same either way: the stars drift towards -x, to the left of the screen.
-//
-// @motion left
-// @float opacity 0.6 0.0 1.0 "Opacity"
 // @color star #ffffff "Star color"
 // @color tint #8ab4ff "Tint"
 // @float strength 0.80 0.0 1.0 "Strength"
 // @float speed 0.15 0.0 1.5 "Drift speed"
-// @float density 0.22 0.05 1.0 "Density"
+// @float density 0.40 0.05 1.0 "Density"
 // @float warp 0.0 0.0 1.0 "Warp streaks (0 = off)"
-// @preset deep-space star=#ffffff tint=#8ab4ff strength=0.80 density=0.22 warp=0
-// @preset hyperdrive star=#ffffff tint=#7fa8ff strength=0.80 speed=0.8 density=0.22 warp=0.9
-// @preset warm star=#fff1d6 tint=#ffb27a strength=0.70 density=0.20 warp=0
+// @preset deep-space star=#ffffff tint=#8ab4ff strength=0.80 density=0.40 warp=0
+// @preset hyperdrive star=#ffffff tint=#7fa8ff strength=0.80 speed=0.8 density=0.40 warp=0.9
+// @preset warm star=#fff1d6 tint=#ffb27a strength=0.70 density=0.35 warp=0
 
 float hash21(vec2 p) {
     p = fract(p * vec2(0.3183099, 0.3678794));
@@ -26,22 +22,20 @@ float hash21(vec2 p) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec4 term = texture(iChannel0, uv);
-    // 1.0 only on plain terminal background: text of any color, the cursor, selections and a thin fringe
-    // around them are masked out (gp_textMask is generated into the header)
-    float bgMask = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float bgMask = 1.0 - smoothstep(0.30, 0.60, lum);
     if (P_strength <= 0.0001 || bgMask <= 0.001) {
         fragColor = term;
         return;
     }
 
-    vec2 fc = gp_yup(fragCoord);
     vec3 add = vec3(0.0);
     float stretch = 1.0 + P_warp * 9.0;
     for (int i = 0; i < 3; i++) {
         float f = float(i);
         float scale = 16.0 + 20.0 * f;
-        vec2 p = fc / iResolution.y * scale;
-        p.x += iTime * P_speed * (0.6 + 0.7 * f) * scale * 0.25;   // the pattern moves right, so the stars drift LEFT
+        vec2 p = fragCoord / iResolution.y * scale;
+        p.x += iTime * P_speed * (0.6 + 0.7 * f) * scale * 0.25;   // nearer layers drift faster
         vec2 id = floor(p);
         vec2 q = fract(p);
         float present = step(1.0 - P_density * 0.35, hash21(id + f * 31.0));

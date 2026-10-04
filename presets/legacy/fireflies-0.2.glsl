@@ -1,21 +1,17 @@
-// Fireflies: a few warm dots drifting on slow loops, each pulsing on its own rhythm. Original code.
-// Only plain-background pixels are touched (text of any color, cursors and selections stay exactly as drawn); the dots are soft glows
+// Fireflies: warm dots drifting on slow loops, each pulsing on its own rhythm. Original code.
+// Only dark background pixels are touched (text stays exactly as drawn); the dots are soft glows
 // drawn behind the text, and nothing samples neighbouring pixels. Ghostty custom shader
 // (Shadertoy-style). Tunable per profile.
 //
-// ORIENTATION: the dots wander on loops with no overall direction (nothing here depends on which way is up).
-//
-// @motion none
-// @float opacity 0.6 0.0 1.0 "Opacity"
 // @color glow #ffe27a "Glow color"
 // @color core #fff6c8 "Core color"
-// @float strength 0.70 0.0 1.0 "Strength"
+// @float strength 0.90 0.0 1.0 "Strength"
 // @float speed 0.35 0.0 2.0 "Drift speed"
-// @float density 0.08 0.02 0.8 "Density"
-// @float size 0.008 0.004 0.04 "Dot size"
-// @preset fireflies glow=#ffe27a core=#fff6c8 strength=0.70 density=0.08
-// @preset lanterns glow=#ff9a4d core=#ffe0b0 strength=0.65 density=0.06 size=0.014
-// @preset spirits glow=#7dffd2 core=#e0fff4 strength=0.65 density=0.07
+// @float density 0.25 0.02 0.8 "Density"
+// @float size 0.012 0.005 0.04 "Dot size"
+// @preset fireflies glow=#ffe27a core=#fff6c8 strength=0.90 density=0.25
+// @preset lanterns glow=#ff9a4d core=#ffe0b0 strength=0.80 density=0.18 size=0.02
+// @preset spirits glow=#7dffd2 core=#e0fff4 strength=0.80 density=0.22
 
 float hash21(vec2 p) {
     p = fract(p * vec2(0.3183099, 0.3678794));
@@ -26,9 +22,8 @@ float hash21(vec2 p) {
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec4 term = texture(iChannel0, uv);
-    // 1.0 only on plain terminal background: text of any color, the cursor, selections and a thin fringe
-    // around them are masked out (gp_textMask is generated into the header)
-    float bgMask = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float bgMask = 1.0 - smoothstep(0.30, 0.60, lum);
     if (P_strength <= 0.0001 || bgMask <= 0.001) {
         fragColor = term;
         return;

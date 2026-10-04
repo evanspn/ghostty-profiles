@@ -1,9 +1,6 @@
 // Dusk: purple and pink XMB-style waves, a little lower and wider than xmb-waves.
 // Ghostty custom shader (Shadertoy-style). Tunable per profile (see xmb-waves.glsl for how).
 //
-// @motion none
-// @coverage full
-// @float opacity 1.0 0.0 1.0 "Opacity"
 // @color wave_a #9b5cff "Wave color"
 // @color wave_b #ff5fa8 "Accent"
 // @float strength 0.18 0.0 0.5 "Strength"
@@ -34,11 +31,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         vec3 c = mix(P_wave_a, P_wave_b, 0.5 + 0.5 * sin(f * 1.1 + t * 0.4 + p.x * 1.2));
         col += c * r * (0.40 + 0.08 * f);
     }
-    // a faint glow along the bottom edge (uv.y = 1 is the BOTTOM of the window in Ghostty)
-    col += mix(P_wave_a, P_wave_b, 0.5) * exp(-abs(uv.y - 0.9) * 5.0) * 0.25;
+    // a faint glow rising from the horizon
+    col += mix(P_wave_a, P_wave_b, 0.5) * exp(-abs(uv.y - 0.1) * 5.0) * 0.25;
     col *= smoothstep(0.0, 0.2, uv.y) * smoothstep(1.0, 0.8, uv.y);
 
-    // keep the effect behind the text: only plain background (see gp_textMask in the header) gets light
-    float textGuard = 1.0 - gp_textMask(fragCoord, term);
+    float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
+    float textGuard = 1.0 - smoothstep(0.35, 0.8, lum);
     fragColor = vec4(term.rgb + col * P_strength * textGuard, term.a);
 }
