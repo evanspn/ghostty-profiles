@@ -163,7 +163,7 @@ pub fn parse_schema(src: &str) -> Result<Schema, String> {
         let err = |m: String| format!("line {n}: {m}");
         match kind {
             "@color" => {
-                let (head, label) = label_and_rest(args).map_err(&err)?;
+                let (head, label) = label_and_rest(args).map_err(err)?;
                 let toks: Vec<&str> = head.split_whitespace().collect();
                 let [name, hex] = toks[..] else { return Err(err("expected: @color NAME #rrggbb \"Label\"".into())) };
                 if !valid_name(name) {
@@ -178,7 +178,7 @@ pub fn parse_schema(src: &str) -> Result<Schema, String> {
                 });
             }
             "@float" => {
-                let (head, label) = label_and_rest(args).map_err(&err)?;
+                let (head, label) = label_and_rest(args).map_err(err)?;
                 let toks: Vec<&str> = head.split_whitespace().collect();
                 let [name, def, min, max] = toks[..] else {
                     return Err(err("expected: @float NAME DEFAULT MIN MAX \"Label\"".into()));
