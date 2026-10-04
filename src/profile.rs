@@ -530,7 +530,7 @@ impl Profile {
             crate::store::atomic_write(&path, src)?;
         }
         self.set_shaders(std::slice::from_ref(&rel));
-        let animated = fs::read_to_string(&path).is_ok_and(|s| s.contains("iTime"));
+        let animated = fs::read_to_string(&path).is_ok_and(|s| uses_itime(&s));
         if animated && self.get("custom-shader-animation").is_none() {
             self.set("custom-shader-animation", "true");
         }
@@ -768,6 +768,26 @@ impl AssetKind {
             AssetKind::Image => "images",
         }
     }
+}
+
+/// Does the shader code (not its comments) read `iTime`?
+fn uses_itime(src: &str) -> bool {
+    let mut code = String::new();
+    let mut rest = src;
+    while let Some(i) = rest.find('/') {
+        code.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if tail.starts_with("//") {
+            rest = tail.find('\n').map_or("", |n| &tail[n..]);
+        } else if let Some(block) = tail.strip_prefix("/*") {
+            rest = block.find("*/").map_or("", |n| &block[n + 2..]);
+        } else {
+            code.push('/');
+            rest = &tail[1..];
+        }
+    }
+    code.push_str(rest);
+    code.contains("iTime")
 }
 
 #[cfg(test)]
