@@ -352,6 +352,26 @@ cargo fmt
 
 Tests run in a temporary config home and never touch your real `~/.config` or signal a running Ghostty.
 
+## Regression checks
+
+Every bundled shader is protected against quiet regressions: `scripts/regress.sh` runs the [shaderlab](https://github.com/evanspn/shader-lab)
+`regress` command over `presets/shaders` and then `cargo test`. Per shader, preset and `scene` lock it checks a golden picture
+(`tests/golden/<shader>/*.png`, the shader over the synthetic terminal frame), orientation at 16:9, 4:3, 1:1, 9:16 and 3:1, text
+preserved, coverage and flat blocks, temporal pops and brightness lurches (plus time-wrap probes), and p50 / p95 ms per 1080p frame
+against `perf-baseline.json` (compared only on the machine it was recorded on). `cargo test` adds the ps3-visualizer specifics: the
+horizon never jumps over 62 s of flight, no hard far edge or flat block, scenes keep their detail after days, matched scene brightness.
+
+```
+scripts/regress.sh            # everything (needs a GPU and shaderlab on PATH)
+scripts/regress.sh --fast     # the quick subset
+scripts/regress.sh --update   # re-record goldens and the baseline after a deliberate change, review the diff, commit
+scripts/install-hooks.sh      # opt in: run the fast subset before every push
+```
+
+A shader that draws over text on purpose carries `// regress: text-ok`. Goldens are the only images the repo allows (synthetic content,
+small, under `tests/golden/` only; `scripts/privacy-scan.sh` enforces it). GitHub Actions has no GPU, so CI runs only format, lints,
+the build, the non-GPU tests and the privacy scan; the GPU checks run locally.
+
 ## License
 
 MIT. The bundled themes come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (MIT); see `themes/README.md`.

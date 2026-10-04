@@ -1,0 +1,29 @@
+{
+  "machine": "Apple M3 Max / macOS 26.5.2",
+  "entries": {
+    "ansi-donut|default|1920x1080": {"p50_ms": 0.491, "p95_ms": 0.715},
+    "aurora|default|1920x1080": {"p50_ms": 0.560, "p95_ms": 0.905},
+    "crt-scanlines|default|1920x1080": {"p50_ms": 0.398, "p95_ms": 0.690},
+    "enchant-glyphs|default|1920x1080": {"p50_ms": 4.553, "p95_ms": 5.474},
+    "fireflies|default|1920x1080": {"p50_ms": 0.723, "p95_ms": 1.140},
+    "matrix-rain|default|1920x1080": {"p50_ms": 0.503, "p95_ms": 0.945},
+    "pixel-rain|default|1920x1080": {"p50_ms": 0.505, "p95_ms": 0.659},
+    "ps3-visualizer|default|1920x1080": {"p50_ms": 3.166, "p95_ms": 3.718},
+    "ps3-visualizer|scene-1|1920x1080": {"p50_ms": 3.211, "p95_ms": 3.826},
+    "ps3-visualizer|scene-2|1920x1080": {"p50_ms": 2.450, "p95_ms": 2.823},
+    "ps3-visualizer|scene-3|1920x1080": {"p50_ms": 0.586, "p95_ms": 0.856},
+    "ps3-visualizer|scene-4|1920x1080": {"p50_ms": 1.012, "p95_ms": 1.436},
+    "ps3-visualizer|scene-5|1920x1080": {"p50_ms": 0.744, "p95_ms": 1.224},
+    "ps3-visualizer|scene-6|1920x1080": {"p50_ms": 0.641, "p95_ms": 1.188},
+    "ps4-polygons|default|1920x1080": {"p50_ms": 0.566, "p95_ms": 1.088},
+    "ps5-light|default|1920x1080": {"p50_ms": 0.703, "p95_ms": 1.607},
+    "snow|default|1920x1080": {"p50_ms": 0.685, "p95_ms": 0.984},
+    "soft-glow|default|1920x1080": {"p50_ms": 0.571, "p95_ms": 1.183},
+    "starfield|default|1920x1080": {"p50_ms": 0.703, "p95_ms": 1.494},
+    "xmb-aurora-ribbons|default|1920x1080": {"p50_ms": 0.604, "p95_ms": 0.937},
+    "xmb-classic|default|1920x1080": {"p50_ms": 0.585, "p95_ms": 1.119},
+    "xmb-dusk|default|1920x1080": {"p50_ms": 0.631, "p95_ms": 1.494},
+    "xmb-mono|default|1920x1080": {"p50_ms": 0.592, "p95_ms": 1.165},
+    "xmb-waves|default|1920x1080": {"p50_ms": 0.658, "p95_ms": 1.124}
+  }
+}

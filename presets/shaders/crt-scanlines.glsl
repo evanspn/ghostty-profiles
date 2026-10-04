@@ -26,3 +26,5 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     fragColor = vec4(term.rgb * dark * flick * vig, term.a);
 }
+
+// regress: text-ok (scanlines and a vignette are drawn over the text by design)

@@ -11,3 +11,8 @@
 *.bmp
 *.tiff
 .DS_Store
+
+# ... except the regression goldens: a shader's output over the SYNTHETIC terminal frame, tiny, under tests/golden only
+!/tests/golden/
+!/tests/golden/**/
+!/tests/golden/**/*.png
