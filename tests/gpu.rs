@@ -1440,3 +1440,45 @@ fn every_visualizer_scene_keeps_its_orientation_at_any_aspect_ratio() {
         }
     }
 }
+
+/// The largest step in the row-averaged brightness between neighbouring rows in the band where the far ground meets the sky.
+/// Averaging across the row ignores waves, ridges and glints; a view-distance cut-off is a line across the whole picture,
+/// so it shows up as a step in the average.
+fn horizon_step(out: &[u8], w: u32, h: u32) -> f32 {
+    let mean = |y: u32| (0..w).map(|x| lum(&out[((y * w + x) * 4) as usize..])).sum::<f32>() / w as f32;
+    let mut worst = 0.0f32;
+    for y in (h * 20 / 100)..(h * 50 / 100) {
+        worst = worst.max((mean(y + 1) - mean(y)).abs());
+    }
+    worst
+}
+
+/// Terrain and water run to a true horizon: at the far end they melt into the sky colour, so there is no hard line where
+/// the view distance used to stop, at any pane shape, camera time or flight speed.
+#[test]
+fn the_far_ground_fades_into_the_sky_without_a_hard_edge_in_every_scene() {
+    let g = gpu_or_skip!();
+    let src = library().into_iter().find(|(n, _)| n.starts_with("ps3-visualizer")).expect("visualizer").1;
+    for (i, scene) in ["hills", "valley", "water"].iter().enumerate() {
+        for speed in ["1.0", "3.0"] {
+            let mut values = BTreeMap::new();
+            values.insert("scene".to_string(), (i + 1).to_string());
+            values.insert("speed".to_string(), speed.to_string());
+            for (w, h) in [(320u32, 180u32), (112, 200), (200, 200)] {
+                for t in [3.0, 17.0, 61.0] {
+                    let out = render_sized(&g, &rendered(&src, &values), &bg_frame(w, h), w, h, t);
+                    let step = horizon_step(&out, w, h);
+                    eprintln!("{scene} speed {speed} {w}x{h} t={t}: {step:.3}");
+                    // water's own waves and the sun's halo add a step of their own to the row average, so it gets a looser bound
+                    let limit = if *scene == "water" { 0.15 } else { 0.06 };
+                    {
+                        assert!(
+                            step < limit,
+                            "{scene} speed {speed} {w}x{h} t={t}: a hard edge near the horizon ({step})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

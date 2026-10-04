@@ -113,8 +113,8 @@ vec3 hills(vec2 p, float z, float t, float audio) {
         grass *= 0.9 + 0.12 * streak;
         grass *= mix(1.0, 0.5, exp(-p.x * p.x * 6.0) * smoothstep(0.0, 0.14, horizon - p.y));
         // atmospheric haze: by a few hundred metres the ground is the colour of the sky at the horizon, with no edge
-        float fog = 1.0 - exp(-tt * 0.0075);
-        col = mix(grass, skyLow, fog * fog * (3.0 - 2.0 * fog) * 0.55 + fog * 0.45);
+        float fog = 1.0 - exp(-tt * 0.011);
+        col = mix(grass, skyLow, fog);
     }
     col *= 1.0 + 0.12 * audio;
     return col;
@@ -174,7 +174,7 @@ vec3 valley(vec2 p, float z, float t, float audio) {
         lit += P_rim * P_glow * (0.9 + 0.7 * audio) * wallH * (fres * smoothstep(8.0, 40.0, tt) * 1.7 + farGlow * 0.7);
         lit += P_rim * 0.20 * smoothstep(0.6, 3.4, pos.y) * (0.3 + 0.7 * haze);
         // distant walls and floor melt into the sky colour: no far edge
-        col = mix(lit, skyCol, haze * haze * (3.0 - 2.0 * haze));
+        col = mix(lit, skyCol, haze);
     }
     // a ray that skims the far floor without landing is the dark road running to the vanishing point, not sky
     if (!hit && rd.y < 0.0) {
@@ -228,8 +228,8 @@ vec3 water(vec2 p, float z, float t, float audio) {
     // glints where a wave face turns toward the sun, and soft light streaks just under the surface
     col += vec3(1.0, 0.96, 0.85) * pow(max(dot(refl, sun), 0.0), 220.0) * (3.0 + 2.0 * audio);
     col += vec3(0.20, 0.55, 0.65) * pow(crest, 4.0) * 0.35 * att;
-    float fog = 1.0 - exp(-tt * 0.012);
-    return mix(col, vec3(0.80, 0.90, 0.95), fog * fog * (3.0 - 2.0 * fog));
+    float fog = 1.0 - exp(-tt * 0.03);
+    return mix(col, vec3(0.80, 0.90, 0.95), fog);
 }
 
 // ---- 4: dark slate with long glossy streaks -----------------------------------------------------------------
