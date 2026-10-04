@@ -154,7 +154,7 @@ copied into the profile only when you select it, and the cursor on one that is n
 | `xmb-mono` | grayscale waves with one tint (mono, warm, cool) |
 | `xmb-aurora-ribbons` | ribbons of light hanging from the top (borealis, ice, ember) |
 | `aurora` | slow curtains of light across the top, behind the text (borealis, arctic, solar) |
-| `enchant-glyphs` | glowing glyphs rising up the screen, drawn procedurally from line strokes (enchanted, emerald, ember, sparse) |
+| `enchant-glyphs` | strings of glowing **Standard Galactic Alphabet** letters (the script of the Minecraft enchanting table) rising up the screen (enchanted, emerald, ember, sparse) |
 | `pixel-rain` | blocky rain falling at a slight angle with splash pixels and an optional thunder flash (drizzle, rain, storm, night) |
 | `matrix-rain` | sparse falling glyph columns with bright heads and short dim trails (matrix, cyber, amber, red) |
 | `starfield` | three parallax layers of stars drifting left, optional warp streaks (deep-space, hyperdrive, warm) |
@@ -163,7 +163,11 @@ copied into the profile only when you select it, and the cursor on one that is n
 | `soft-glow` | a gentle vignette on the background; an optional text glow (off by default, because it softens text) |
 | `crt-scanlines` | scanlines, vignette and a faint flicker |
 
-All of them are original code.
+All of them are original code. `enchant-glyphs` draws the 26 letters of the Standard Galactic Alphabet (a constructed alphabet created for the
+Commander Keen games, with one symbol per Latin letter; it is what Minecraft's enchanting table displays) from **hand-built stroke data**
+written for this project: a few line segments per letter on a 12x12 grid. No font file, texture or artwork from any game is used or included.
+The strings are random letters, and the same screen position always spells the same letters. The GPU tests render all 26 letterforms to a
+chart and check that each is drawn and that no two look alike.
 
 ### Behind the text, never over it
 

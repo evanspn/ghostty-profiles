@@ -1168,3 +1168,125 @@ fn the_previous_versions_really_did_fall_upward_in_ghostty_which_is_what_the_ope
         assert!(dy < 0, "{stem} 0.2 should have moved UP the screen (dy < 0), measured {dy:+}");
     }
 }
+
+// ---- the Standard Galactic Alphabet glyphs ------------------------------------------------------
+
+/// The glyph data section of enchant-glyphs.glsl (between its markers), plus a `mainImage` that draws all 26 letters
+/// as a chart: 7 columns x 4 rows, dark strokes on white, A first. Used to look at the letterforms.
+fn sga_chart_shader() -> String {
+    let src = library().into_iter().find(|(n, _)| n == "enchant-glyphs.glsl").unwrap().1;
+    let a = src.find("// ---- SGA glyph data (begin) ----").expect("begin marker");
+    let b = src.find("// ---- SGA glyph data (end) ----").expect("end marker");
+    let data = &src[a..b];
+    format!(
+        "{data}\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {{
+    vec2 g = fragCoord / iResolution.xy * vec2(7.0, 4.0);
+    vec2 cellId = floor(g);
+    vec2 q = fract(g);
+    int letter = int(cellId.y) * 7 + int(cellId.x);
+    vec3 col = vec3(1.0);
+    if (letter < 26) {{
+        // y is DOWN in Ghostty, so flip to y-up for the glyph grid
+        vec2 u = (vec2(q.x, 1.0 - q.y) - vec2(0.14)) / 0.72 * 12.0;
+        float d = sga_dist(u, letter);
+        float core = 1.0 - smoothstep(1.15, 1.85, d);
+        col = mix(vec3(1.0), vec3(0.15, 0.0, 0.45), core);
+        // a faint cell border
+        float edge = min(min(q.x, 1.0 - q.x), min(q.y, 1.0 - q.y));
+        col = mix(col, vec3(0.8), 1.0 - smoothstep(0.0, 0.01, edge));
+    }}
+    fragColor = vec4(col, 1.0);
+}}\n"
+    )
+}
+
+#[test]
+fn all_26_standard_galactic_alphabet_letters_are_drawn_and_all_look_different() {
+    let g = gpu_or_skip!();
+    let (w, h) = (700u32, 400u32);
+    let blank = vec![255u8; (w * h * 4) as usize];
+    let out = render_sized(&g, &sga_chart_shader(), &blank, w, h, 0.0);
+    if let Ok(dir) = std::env::var("GPF_DUMP_DIR") {
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut data = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for p in out.chunks(4) {
+            data.extend_from_slice(&p[..3]);
+        }
+        std::fs::write(format!("{dir}/sga-chart.ppm"), data).unwrap();
+    }
+    let (cw, ch) = (w / 7, h / 4);
+    let mut cells: Vec<Vec<bool>> = Vec::new();
+    for letter in 0..26u32 {
+        let (cx, cy) = (letter % 7, letter / 7);
+        let mut inked = Vec::new();
+        for y in 0..ch {
+            for x in 0..cw {
+                let i = (((cy * ch + y) * w + cx * cw + x) * 4) as usize;
+                inked.push(out[i] < 128);
+            }
+        }
+        let n = inked.iter().filter(|b| **b).count();
+        assert!(n > 150, "letter {} ({}) draws almost nothing ({n} pixels)", letter, (b'A' + letter as u8) as char);
+        cells.push(inked);
+    }
+    for a in 0..26 {
+        for b in (a + 1)..26 {
+            let diff = cells[a].iter().zip(&cells[b]).filter(|(x, y)| x != y).count();
+            assert!(
+                diff > 200, // C and S are genuinely similar in the alphabet itself: a pair of stacked marks each
+                "{} and {} look too alike ({diff} pixels differ)",
+                (b'A' + a as u8) as char,
+                (b'A' + b as u8) as char
+            );
+        }
+    }
+    // the spare slots after Z (26, 27) are blank
+    for slot in 26..28u32 {
+        let (cx, cy) = (slot % 7, slot / 7);
+        let i = (((cy * ch + ch / 2) * w + cx * cw + cw / 2) * 4) as usize;
+        assert_eq!(out[i], 255);
+    }
+    // the same chart twice is the same picture (the letterforms are fixed data, not random)
+    assert!(out == render_sized(&g, &sga_chart_shader(), &blank, w, h, 5.0));
+}
+
+#[test]
+fn the_glyph_strings_are_deterministic_and_actually_drawn_as_letters_not_random_blobs() {
+    let g = gpu_or_skip!();
+    let (w, h) = (640u32, 360u32);
+    let bg = bg_frame(w, h);
+    let src = library().into_iter().find(|(n, _)| n == "enchant-glyphs.glsl").unwrap().1;
+    let dense: BTreeMap<String, String> = [
+        ("density".to_string(), "0.5".to_string()),
+        ("opacity".to_string(), "1".to_string()),
+        ("strength".to_string(), "1".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let s = rendered(&src, &dense);
+    // same inputs, same pixels: the letters come from a fixed hash of the screen position
+    assert!(render_sized(&g, &s, &bg, w, h, 6.0) == render_sized(&g, &s, &bg, w, h, 6.0));
+    // a frozen field (speed ~ 0 is not allowed, so compare two times that differ only by the twinkle): the layout of
+    // letters is the same, only brightness changes slightly
+    let slow: BTreeMap<String, String> =
+        [("speed".to_string(), "0.02".to_string())].into_iter().chain(dense.clone()).collect();
+    let s2 = rendered(&src, &slow);
+    let (a, b) = (
+        effect_layer(&render_sized(&g, &s2, &bg, w, h, 6.0), &bg),
+        effect_layer(&render_sized(&g, &s2, &bg, w, h, 6.01), &bg),
+    );
+    let both = a.iter().zip(&b).filter(|(x, y)| **x > 0.05 && **y > 0.05).count();
+    let either = a.iter().zip(&b).filter(|(x, y)| **x > 0.05 || **y > 0.05).count();
+    assert!(
+        either > 500 && both * 10 >= either * 8,
+        "the glyph strokes stay where they are over 10 ms ({both}/{either})"
+    );
+    if let Ok(dir) = std::env::var("GPF_DUMP_DIR") {
+        let out = render_sized(&g, &s, &bg, w, h, 6.0);
+        let mut data = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for p in out.chunks(4) {
+            data.extend_from_slice(&p[..3]);
+        }
+        std::fs::write(format!("{dir}/enchant-glyphs-dense.ppm"), data).unwrap();
+    }
+}
