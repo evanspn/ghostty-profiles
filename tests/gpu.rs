@@ -1614,3 +1614,38 @@ fn no_scene_pops_between_frames_over_forty_seconds() {
         assert!(worst < 3.0 * median + 1.5, "{scene}: a frame pops (median {median}, worst {worst})");
     }
 }
+
+/// A pane left running for days must look the same as at the start: float precision in the clock and in the world coordinates
+/// must not coarsen the picture (the water used to turn blocky after about a day). Compared by fine-detail energy: the mean
+/// brightness change between neighbouring pixels, over several camera times near the start and near hours/days later.
+#[test]
+fn every_scene_keeps_its_detail_after_hours_and_days() {
+    let g = gpu_or_skip!();
+    let src = library().into_iter().find(|(n, _)| n.starts_with("ps3-visualizer")).expect("visualizer").1;
+    let (w, h) = (320u32, 180u32);
+    let frame = bg_frame(w, h);
+    let detail = |out: &[u8]| {
+        let l = |x: u32, y: u32| lum(&out[((y * w + x) * 4) as usize..]);
+        let mut s = 0.0f32;
+        for y in 0..h - 1 {
+            for x in 0..w - 1 {
+                s += (l(x + 1, y) - l(x, y)).abs() + (l(x, y + 1) - l(x, y)).abs();
+            }
+        }
+        s / (2 * (w - 1) * (h - 1)) as f32
+    };
+    for (i, scene) in ["hills", "valley", "water", "silk", "wash", "tunnel"].iter().enumerate() {
+        let mut values = BTreeMap::new();
+        values.insert("scene".to_string(), (i + 1).to_string());
+        let shader = rendered(&src, &values);
+        let mean = |times: [f32; 4]| {
+            times.iter().map(|&t| detail(&render_sized(&g, &shader, &frame, w, h, t))).sum::<f32>() / 4.0
+        };
+        let start = mean([20.0, 31.0, 47.0, 63.0]);
+        for base in [100_000.0f32, 1_000_000.0] {
+            let later = mean([base, base + 11.0, base + 27.0, base + 43.0]);
+            eprintln!("{scene}: start {start:.4}, at {base}: {later:.4}");
+            assert!(later > 0.6 * start && later < 1.6 * start, "{scene} at t={base}: detail {later} vs {start} at the start");
+        }
+    }
+}

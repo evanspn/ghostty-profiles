@@ -367,26 +367,37 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 fc = gp_yup(fragCoord);                      // y up: the sky is at the top of the window
     vec2 p = (fc - 0.5 * iResolution.xy) / iResolution.y;
     float phase = iTime * P_tempo / 60.0;
-    float beat = pow(0.5 + 0.5 * cos(6.2831853 * phase), 8.0);
+    // (the beat uses only the fractional part of the phase: after hours the phase is huge and cos() of it would be noise)
+    float beat = pow(0.5 + 0.5 * cos(6.2831853 * fract(phase)), 8.0);
     beat *= 0.25 + 0.75 * pow(0.5 + 0.5 * sin(phase * 0.47), 4.0);
     // AUDIO: replace beat above with a smoothed audio-level uniform (0..1).
     float audio = P_pulse * beat;
 
     vec3 col;
     if (P_scene >= 0.5) {
-        col = renderScene(int(P_scene + 0.5), p, iTime, iTime, audio);
+        // one scene locked: its flight clock restarts every 40 minutes, dissolving into the start over the last seconds, so the
+        // positions stay small however long it runs
+        int sid = int(P_scene + 0.5);
+        float tl = mod(iTime, 2400.0);
+        col = renderScene(sid, p, tl, iTime, audio);
+        if (tl > 2400.0 - P_fade) {
+            float w = smoothstep(0.0, 1.0, (tl - (2400.0 - P_fade)) / P_fade);
+            col = mix(col, renderScene(sid, p, tl - 2400.0, iTime, audio), w);
+        }
     } else {
         int nd = max(1, min(6, int(floor(log(max(P_playlist, 1.0)) / 2.302585) + 1.0)));
         float slotF = floor(iTime / P_scene_period);
         float into = iTime - slotF * P_scene_period;
         int k = int(mod(slotF, float(nd)));
         int idA = clamp(digitAt(P_playlist, k, nd), 1, 6);
-        col = renderScene(idA, p, into + slotF * 11.0, iTime, audio);
+        // each slot flies from its own stretch of country; the offset cycles through 64 stretches, so nothing grows without bound
+        // and a pane left running for days keeps the same precision (the cycle seam is inside a cross-fade)
+        col = renderScene(idA, p, into + mod(slotF, 64.0) * 11.0, iTime, audio);
         float fadeStart = P_scene_period - P_fade;
         if (into > fadeStart) {
             int idB = clamp(digitAt(P_playlist, int(mod(slotF + 1.0, float(nd))), nd), 1, 6);
             float w = smoothstep(0.0, 1.0, (into - fadeStart) / P_fade);
-            col = mix(col, renderScene(idB, p, (into - P_scene_period) + (slotF + 1.0) * 11.0, iTime, audio), w);
+            col = mix(col, renderScene(idB, p, (into - P_scene_period) + mod(slotF + 1.0, 64.0) * 11.0, iTime, audio), w);
         }
     }
     col = softLimit(col, P_maxlum);
