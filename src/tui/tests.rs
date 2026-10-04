@@ -11,7 +11,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, Tab};
+use super::app::{App, Tab, Top};
 use super::ui;
 use crate::ghostty::{ReloadResult, Reloader};
 use crate::paths::Paths;
@@ -59,7 +59,7 @@ impl Harness {
     fn select_profile(&mut self, name: &str) {
         let i = self.app.profiles.iter().position(|p| p == name).unwrap();
         self.app.tab = Tab::Profiles;
-        if self.app.none_selected {
+        while self.app.top.is_some() {
             self.press(KeyCode::Down);
         }
         while self.app.sel < i {
@@ -346,6 +346,7 @@ fn new_delete_and_the_active_profile_is_protected() {
     h.press(KeyCode::Char('n'));
     h.type_text("mine");
     h.press(KeyCode::Enter);
+    h.press(KeyCode::Char('2')); // a copy of the selected profile
     assert!(h.app.profiles.contains(&"mine".to_string()));
     assert_eq!(h.app.current_name(), Some("mine"), "the new profile is selected");
     assert!(h.conf("mine").contains("copy of shd"));
@@ -421,10 +422,10 @@ fn none_row_is_always_there_and_marks_the_active_state() {
     // the (none) row is reachable with Up from the first profile, and Down comes back
     h.select_profile("aurora-glass");
     h.press(KeyCode::Up);
-    assert!(h.app.none_selected && h.app.current_name().is_none());
+    assert!(h.app.top == Some(Top::None) && h.app.current_name().is_none());
     assert!(h.screen(110, 30).contains("Enter turns the active profile off"));
     h.press(KeyCode::Down);
-    assert!(!h.app.none_selected && h.app.current_name() == Some("aurora-glass"));
+    assert!(h.app.top.is_none() && h.app.current_name() == Some("aurora-glass"));
 }
 
 #[test]
@@ -472,7 +473,7 @@ fn edits_while_none_is_selected_change_nothing_and_say_why() {
 
     h.select_profile("aurora-glass");
     h.press(KeyCode::Up);
-    assert!(h.app.none_selected);
+    assert!(h.app.top == Some(Top::None));
     h.go_to_field("background");
     h.press(KeyCode::Enter);
     h.type_text("#123456");
@@ -496,4 +497,211 @@ fn edits_while_none_is_selected_change_nothing_and_say_why() {
     assert!(h.conf("shd").contains("font-size = 15"));
     assert_eq!(h.active_conf(), crate::store::OFF_CONF);
     assert!(h.app.status.text.contains("not the active profile"));
+}
+
+// ---- creating profiles -------------------------------------------------------------
+
+impl Harness {
+    fn write_ghostty(&self, file: &str, text: &str) {
+        let d = self.app.store.paths.ghostty_dir();
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(file), text).unwrap();
+    }
+
+    fn read_ghostty(&self, file: &str) -> String {
+        fs::read_to_string(self.app.store.paths.ghostty_dir().join(file)).unwrap_or_default()
+    }
+
+    /// Start the flow with `n`, type the name and press Enter: the base chooser is now up.
+    fn start_new(&mut self, name: &str) {
+        self.app.tab = Tab::Profiles;
+        self.press(KeyCode::Char('n'));
+        self.type_text(name);
+        self.press(KeyCode::Enter);
+    }
+}
+
+#[test]
+fn a_new_profile_row_is_first_in_the_list_and_the_footer_names_the_keys() {
+    let mut h = harness();
+    let screen = h.screen(120, 30);
+    assert!(screen.contains("+ New profile"), "{screen}");
+    let new_row = screen.lines().position(|l| l.contains("+ New profile")).unwrap();
+    let none_row = screen.lines().position(|l| l.contains("(none)")).unwrap();
+    let first_profile = screen.lines().position(|l| l.contains("│  aurora-glass")).unwrap();
+    assert!(new_row < none_row && none_row < first_profile, "it is the first row:\n{screen}");
+    for hint in ["n new profile", "d delete", "e export", "u off", "Enter apply"] {
+        assert!(screen.contains(hint), "footer is missing '{hint}':\n{screen}");
+    }
+    // Up from the first profile reaches (none), then + New profile
+    h.select_profile("aurora-glass");
+    h.press(KeyCode::Up);
+    assert_eq!(h.app.top, Some(Top::None));
+    h.press(KeyCode::Up);
+    assert_eq!(h.app.top, Some(Top::New));
+    assert!(h.screen(120, 30).contains("then choose what it starts from"));
+    // Enter on the row starts the flow, same as n
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.is_some());
+    assert!(h.screen(120, 30).contains("New profile: name"));
+}
+
+#[test]
+fn name_validation_gives_a_clear_inline_error_and_keeps_the_box_open() {
+    let mut h = harness();
+    for (typed, expect) in [
+        ("", "type a name"),
+        ("   ", "type a name"),
+        ("a/b", "letters, digits"),
+        ("has space", "letters, digits"),
+        (".hidden", "letters, digits"),
+        ("shd", "already exists"),
+    ] {
+        h.app.tab = Tab::Profiles;
+        h.press(KeyCode::Char('n'));
+        h.type_text(typed);
+        h.press(KeyCode::Enter);
+        assert!(h.app.wizard.is_none(), "{typed:?} must not start the flow");
+        let err = h.app.input.as_ref().unwrap().error.clone().unwrap();
+        assert!(err.contains(expect), "{typed:?}: {err}");
+        assert!(h.screen(120, 30).contains(expect), "the error is on screen for {typed:?}");
+        h.press(KeyCode::Esc);
+    }
+    assert_eq!(h.app.profiles.len(), 4, "nothing was created");
+    // a good name moves on to choosing the base
+    h.start_new("fresh");
+    assert!(h.app.wizard.is_some() && h.app.input.is_none());
+    let screen = h.screen(120, 30);
+    for line in ["your current Ghostty setup", "a copy of", "blank", "NOT applied"] {
+        assert!(screen.contains(line), "{line}:\n{screen}");
+    }
+    h.press(KeyCode::Esc);
+    assert!(h.app.wizard.is_none() && !h.app.profiles.contains(&"fresh".to_string()), "Esc cancels");
+}
+
+#[test]
+fn blank_base_makes_an_empty_profile_that_is_selected_and_not_applied() {
+    let mut h = harness();
+    h.apply("shd");
+    let (active_before, reloads) = (h.active_conf(), h.reloads.get());
+    h.start_new("blank1");
+    h.press(KeyCode::Char('3'));
+    assert!(h.app.wizard.is_none());
+    assert_eq!(h.app.current_name(), Some("blank1"), "it appears in the list and is selected");
+    assert!(h.conf("blank1").lines().all(|l| l.starts_with('#')), "blank means no settings: {}", h.conf("blank1"));
+    assert_eq!(h.app.active.as_deref(), Some("shd"), "the active profile did not change");
+    assert_eq!(h.active_conf(), active_before, "nothing was applied");
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads, "and Ghostty was not reloaded");
+    assert!(h.app.status.text.contains("Not applied yet"));
+    assert!(h.screen(120, 30).contains("blank1"));
+}
+
+#[test]
+fn copy_base_duplicates_the_selected_profile_and_does_not_apply_it() {
+    let mut h = harness();
+    h.select_profile("crt-green");
+    h.start_new("my-crt");
+    h.press(KeyCode::Char('2'));
+    assert_eq!(h.app.current_name(), Some("my-crt"));
+    assert!(h.conf("my-crt").contains("background = #040a05"), "same settings as crt-green");
+    assert!(h.conf("my-crt").contains("copy of crt-green"));
+    assert!(h.app.store.active_name().is_none(), "nothing is applied");
+    assert!(!h.app.store.paths.active_conf().exists(), "no generated config was written");
+}
+
+#[test]
+fn copy_is_refused_when_no_profile_was_selected() {
+    let mut h = harness();
+    h.select_profile("aurora-glass");
+    h.press(KeyCode::Up); // onto (none)
+    h.start_new("c");
+    h.press(KeyCode::Char('2'));
+    assert!(h.app.wizard.is_some(), "stays in the chooser");
+    assert!(h.app.status.text.contains("no selected profile"));
+    assert!(!h.app.profiles.contains(&"c".to_string()));
+    h.press(KeyCode::Char('3')); // blank still works
+    assert!(h.app.profiles.contains(&"c".to_string()));
+}
+
+#[test]
+fn current_setup_base_warns_then_moves_the_setup_into_the_profile_and_does_not_apply() {
+    let mut h = harness();
+    h.write_ghostty("config", "foreground = #111111\nkeybind = alt+t=toggle_quick_terminal\nfont-family = Menlo\n");
+    h.write_ghostty(
+        "config.ghostty",
+        "background = #2c2c2c\nfont-size = 14\nshell-integration = zsh\npalette = 0=#0a0a0a\n",
+    );
+    let main_before = h.read_ghostty("config");
+
+    h.start_new("mine");
+    h.press(KeyCode::Char('1'));
+    // the one-line warning is on screen before anything happens
+    let screen = h.screen(120, 30);
+    assert!(screen.contains("MOVES your appearance settings"), "{screen}");
+    assert!(screen.contains("bak-pre-ghostty-profiles") && screen.contains("shows defaults"), "{screen}");
+    assert_eq!(h.read_ghostty("config"), main_before, "nothing moved yet");
+    assert!(!h.app.profiles.contains(&"mine".to_string()));
+
+    // any other key goes back to the chooser, still nothing done
+    h.press(KeyCode::Char('x'));
+    assert!(h.screen(120, 30).contains("1  your current Ghostty setup"));
+    assert_eq!(h.read_ghostty("config"), main_before);
+
+    // confirm
+    h.press(KeyCode::Char('1'));
+    h.press(KeyCode::Char('y'));
+    assert!(h.app.wizard.is_none());
+    assert_eq!(h.app.current_name(), Some("mine"));
+    let conf = h.conf("mine");
+    assert!(conf.contains("background = #2c2c2c") && conf.contains("foreground = #111111"));
+    assert!(
+        conf.contains("font-family = Menlo") && conf.contains("font-size = 14") && conf.contains("palette = 0=#0a0a0a")
+    );
+    assert!(!conf.contains("keybind") && !conf.contains("shell-integration"), "only appearance moved: {conf}");
+    // the user's files lost only appearance settings, and were backed up first
+    assert_eq!(h.read_ghostty("config"), "keybind = alt+t=toggle_quick_terminal\n");
+    assert_eq!(h.read_ghostty("config.ghostty"), "shell-integration = zsh\n");
+    assert_eq!(h.read_ghostty("config.bak-pre-ghostty-profiles"), main_before);
+    assert!(h.read_ghostty("config.ghostty.bak-pre-ghostty-profiles").contains("background = #2c2c2c"));
+    // not applied: no active profile, no generated config, no include line, no reload
+    assert_eq!(h.app.store.active_name(), None);
+    assert!(!h.app.store.paths.active_conf().exists());
+    assert!(!h.app.store.is_linked());
+    h.tick();
+    assert_eq!(h.reloads.get(), 0);
+    assert!(h.app.status.text.contains("Not applied yet"));
+}
+
+#[test]
+fn the_new_profile_is_edited_on_the_edit_tab_as_usual_and_apply_stays_explicit() {
+    let mut h = harness();
+    h.start_new("brand-new");
+    h.press(KeyCode::Char('3'));
+    h.go_to_field("background");
+    h.press(KeyCode::Enter);
+    h.type_text("#223344");
+    h.press(KeyCode::Enter);
+    assert!(h.conf("brand-new").contains("background = #223344"));
+    assert!(h.app.status.text.contains("not the active profile"), "editing does not apply it");
+    assert!(!h.app.store.paths.active_conf().exists());
+    // Enter on it is what applies
+    h.select_profile("brand-new");
+    h.press(KeyCode::Enter);
+    h.tick();
+    assert_eq!(h.app.active.as_deref(), Some("brand-new"));
+    assert!(h.active_conf().contains("background = #223344"));
+}
+
+#[test]
+fn the_wizard_draws_at_small_sizes_without_panicking() {
+    let mut h = harness();
+    h.start_new("small");
+    for (w, hh) in [(30, 10), (60, 14), (120, 40)] {
+        assert!(h.screen(w, hh).contains("New profile") || w < 40, "{w}x{hh}");
+    }
+    h.press(KeyCode::Char('1'));
+    for (w, hh) in [(30, 10), (60, 16), (120, 40)] {
+        let _ = h.screen(w, hh);
+    }
 }

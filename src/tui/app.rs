@@ -55,6 +55,38 @@ pub struct Input {
     pub error: Option<String>,
 }
 
+/// The rows above the profiles in the Profiles list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Top {
+    /// "+ New profile".
+    New,
+    /// "(none)": no profile.
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WizardStep {
+    /// Choosing what the new profile starts from (0 current setup, 1 copy, 2 blank).
+    Base(usize),
+    /// Confirming that the current Ghostty setup will be moved into the profile.
+    ConfirmAdopt,
+}
+
+/// New-profile flow after the name has been typed: pick a base, then create.
+#[derive(Clone, Debug)]
+pub struct Wizard {
+    pub name: String,
+    pub step: WizardStep,
+    /// The profile that was selected when the flow started (the "copy of" source).
+    pub copy_from: Option<String>,
+}
+
+enum Base {
+    CurrentSetup,
+    Copy(String),
+    Blank,
+}
+
 #[derive(Clone, Debug)]
 pub struct ShaderRow {
     pub name: String,
@@ -82,8 +114,9 @@ pub struct App {
 
     pub profiles: Vec<String>,
     pub sel: usize,
-    /// The cursor is on the "(none)" row above the profiles: no profile is being looked at.
-    pub none_selected: bool,
+    /// The cursor is on a row above the profiles ("+ New profile" or "(none)"), not on a profile.
+    pub top: Option<Top>,
+    pub wizard: Option<Wizard>,
     pub profile: Option<Profile>,
     pub active: Option<String>,
 
@@ -114,7 +147,8 @@ impl App {
             confirm_delete: None,
             profiles: Vec::new(),
             sel: 0,
-            none_selected: false,
+            top: None,
+            wizard: None,
             profile: None,
             active: None,
             themes,
@@ -140,14 +174,14 @@ impl App {
     }
 
     pub fn current_name(&self) -> Option<&str> {
-        if self.none_selected { None } else { self.profiles.get(self.sel).map(String::as_str) }
+        if self.top.is_some() { None } else { self.profiles.get(self.sel).map(String::as_str) }
     }
 
     // ---- profile list ---------------------------------------------------------
     /// Reload the list; keep `keep` selected if given, else the previous or the active one.
     pub fn refresh_profiles(&mut self, keep: Option<&str>) {
         let previous = keep.map(str::to_string).or_else(|| self.current_name().map(str::to_string));
-        self.none_selected = false;
+        self.top = None;
         self.profiles = self.store.list_profiles();
         self.active = self.store.active_name();
         let want = previous.or_else(|| self.active.clone());
@@ -209,6 +243,10 @@ impl App {
             self.on_input_key(key);
             return;
         }
+        if self.wizard.is_some() {
+            self.wizard_key(key);
+            return;
+        }
         if let Some(name) = self.confirm_delete.take() {
             if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                 self.delete_profile(&name);
@@ -268,34 +306,43 @@ impl App {
 
     // ---- Profiles tab -----------------------------------------------------------
     fn profiles_key(&mut self, key: KeyEvent) {
-        let before = (self.sel, self.none_selected);
+        let before = (self.sel, self.top);
         match key.code {
-            // "(none)" is the row above the first profile
-            KeyCode::Up | KeyCode::Char('k') if !self.none_selected && self.sel == 0 => self.none_selected = true,
-            KeyCode::Home => self.none_selected = true,
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown | KeyCode::End if self.none_selected => {
-                self.none_selected = false;
-                self.sel = if key.code == KeyCode::End { self.profiles.len().saturating_sub(1) } else { 0 };
-            }
-            KeyCode::Up
-            | KeyCode::Char('k')
-            | KeyCode::PageUp
-            | KeyCode::Down
-            | KeyCode::Char('j')
-            | KeyCode::PageDown
-            | KeyCode::End
-                if !self.none_selected =>
-            {
-                Self::step(&mut self.sel, self.profiles.len(), key.code)
+            // the rows above the list: "+ New profile", then "(none)", then the profiles
+            KeyCode::Up | KeyCode::Char('k') => match self.top {
+                Some(Top::New) => {}
+                Some(Top::None) => self.top = Some(Top::New),
+                None if self.sel == 0 => self.top = Some(Top::None),
+                None => Self::step(&mut self.sel, self.profiles.len(), key.code),
+            },
+            KeyCode::Down | KeyCode::Char('j') => match self.top {
+                Some(Top::New) => self.top = Some(Top::None),
+                Some(Top::None) => {
+                    self.top = None;
+                    self.sel = 0;
+                }
+                None => Self::step(&mut self.sel, self.profiles.len(), key.code),
+            },
+            KeyCode::Home => self.top = Some(Top::New),
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::End => {
+                if self.top.is_some() {
+                    self.top = None;
+                    self.sel = if key.code == KeyCode::End { self.profiles.len().saturating_sub(1) } else { 0 };
+                } else {
+                    Self::step(&mut self.sel, self.profiles.len(), key.code);
+                }
             }
             _ => {}
         }
-        if (self.sel, self.none_selected) != before {
+        if (self.sel, self.top) != before {
             self.load_selected();
         }
         match key.code {
-            KeyCode::Enter if self.none_selected => self.deactivate(),
-            KeyCode::Enter => self.apply_selected(),
+            KeyCode::Enter => match self.top {
+                Some(Top::New) => self.begin_new(),
+                Some(Top::None) => self.deactivate(),
+                None => self.apply_selected(),
+            },
             KeyCode::Char('u') => self.deactivate(),
             KeyCode::Char('p') => match self.store.install_presets(false) {
                 Ok(v) if v.is_empty() => self.say("all preset profiles are already installed", true),
@@ -338,13 +385,81 @@ impl App {
         }
     }
 
-    fn begin_new(&mut self) {
-        let from = self.current_name().map(str::to_string);
-        let title = match &from {
-            Some(f) => format!("New profile (a copy of '{f}')"),
-            None => "New profile".to_string(),
+    /// Start the new-profile flow: ask for a name (the base is chosen next).
+    pub fn begin_new(&mut self) {
+        self.input = Some(Input {
+            kind: InputKind::NewProfile,
+            title: "New profile: name".to_string(),
+            buf: String::new(),
+            error: None,
+        });
+    }
+
+    fn wizard_key(&mut self, key: KeyEvent) {
+        let Some(w) = self.wizard.clone() else { return };
+        match w.step {
+            WizardStep::Base(sel) => match key.code {
+                KeyCode::Esc => {
+                    self.wizard = None;
+                    self.say("new profile cancelled", true);
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.set_wizard_step(WizardStep::Base(sel.saturating_sub(1))),
+                KeyCode::Down | KeyCode::Char('j') => self.set_wizard_step(WizardStep::Base((sel + 1).min(2))),
+                KeyCode::Char('1') => self.choose_base(0),
+                KeyCode::Char('2') => self.choose_base(1),
+                KeyCode::Char('3') => self.choose_base(2),
+                KeyCode::Enter => self.choose_base(sel),
+                _ => {}
+            },
+            WizardStep::ConfirmAdopt => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.create_profile(Base::CurrentSetup),
+                KeyCode::Esc => {
+                    self.wizard = None;
+                    self.say("new profile cancelled", true);
+                }
+                _ => self.set_wizard_step(WizardStep::Base(0)),
+            },
+        }
+    }
+
+    fn set_wizard_step(&mut self, step: WizardStep) {
+        if let Some(w) = self.wizard.as_mut() {
+            w.step = step;
+        }
+    }
+
+    fn choose_base(&mut self, i: usize) {
+        match i {
+            0 => self.set_wizard_step(WizardStep::ConfirmAdopt),
+            1 => match self.wizard.as_ref().and_then(|w| w.copy_from.clone()) {
+                Some(src) => self.create_profile(Base::Copy(src)),
+                None => self.say("there is no selected profile to copy: pick a profile first", false),
+            },
+            _ => self.create_profile(Base::Blank),
+        }
+    }
+
+    /// Create the profile the wizard has been collecting. It is selected afterwards, never applied.
+    fn create_profile(&mut self, base: Base) {
+        let Some(w) = self.wizard.take() else { return };
+        let name = w.name;
+        let result = match &base {
+            Base::CurrentSetup => self.store.adopt(&name).map(|(_, notes)| notes),
+            Base::Copy(src) => self.store.new_profile(&name, Some(src)).map(|_| Vec::new()),
+            Base::Blank => self.store.new_profile(&name, None).map(|_| Vec::new()),
         };
-        self.input = Some(Input { kind: InputKind::NewProfile, title, buf: String::new(), error: None });
+        match result {
+            Ok(_) => {
+                let from = match &base {
+                    Base::CurrentSetup => "your current Ghostty setup (originals backed up)".to_string(),
+                    Base::Copy(src) => format!("a copy of '{src}'"),
+                    Base::Blank => "blank".to_string(),
+                };
+                self.refresh_profiles(Some(&name));
+                self.say(format!("created '{name}' from {from}. Not applied yet: press Enter on it to apply"), true);
+            }
+            Err(e) => self.say(format!("could not create '{name}': {e:#}"), false),
+        }
     }
 
     fn begin_delete(&mut self) {
@@ -657,22 +772,22 @@ impl App {
             }
             InputKind::NewProfile => {
                 let name = input.buf.trim().to_string();
-                if !valid_name(&name) {
-                    self.say("name must be letters, digits, '.', '_' or '-'", false);
-                    self.input = Some(Input { error: Some(self.status.text.clone()), ..input });
+                let problem = if name.is_empty() {
+                    Some("type a name for the new profile".to_string())
+                } else if !valid_name(&name) {
+                    Some("name must be letters, digits, '.', '_' or '-' (no spaces or slashes)".to_string())
+                } else if self.store.exists(&name) {
+                    Some(format!("a profile named '{name}' already exists: pick another name"))
+                } else {
+                    None
+                };
+                if let Some(p) = problem {
+                    self.say(p.clone(), false);
+                    self.input = Some(Input { error: Some(p), ..input });
                     return;
                 }
-                let from = self.current_name().map(str::to_string);
-                match self.store.new_profile(&name, from.as_deref()) {
-                    Ok(_) => {
-                        self.say(format!("created '{name}'"), true);
-                        self.refresh_profiles(Some(&name));
-                    }
-                    Err(e) => {
-                        self.say(format!("{e:#}"), false);
-                        self.input = Some(Input { error: Some(self.status.text.clone()), ..input });
-                    }
-                }
+                let copy_from = self.current_name().map(str::to_string);
+                self.wizard = Some(Wizard { name, step: WizardStep::Base(0), copy_from });
             }
             InputKind::Export => {
                 let Some(p) = self.profile.clone() else { return };

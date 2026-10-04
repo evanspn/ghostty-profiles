@@ -61,6 +61,20 @@ Every valid edit is **autosaved** to the profile, the active config is re-render
 is reloaded after a short (250 ms) pause so a burst of edits causes one reload. Invalid values
 (a bad hex color, an opacity of 3) are refused with a message and change nothing.
 
+## Making a profile
+
+On the Profiles tab press `n` (or select the `+ New profile` row and press `Enter`), type a name, then choose what it starts from:
+
+1. **your current Ghostty setup**: the same as `gpf adopt NAME`. Your appearance settings (colors, fonts, cursor, opacity,
+   shaders, background) are *moved* out of your Ghostty config into the profile; keybinds and other settings stay. The
+   originals are backed up as `*.bak-pre-ghostty-profiles`, and you are asked to confirm first.
+2. **a copy of the selected profile**
+3. **blank**
+
+The new profile appears in the list and is selected, but it is **not applied** until you press `Enter` on it. (After choosing
+option 1 your look lives only in the new profile, so until you apply it a Ghostty reload shows the defaults.) Then use the Edit
+tab as usual. Names are letters, digits, `.`, `_` and `-`, and must not already exist; mistakes are explained under the name box.
+
 ## Profiles
 
 A profile is a folder:

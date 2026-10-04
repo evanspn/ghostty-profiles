@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
-use super::app::{App, Tab};
+use super::app::{App, Tab, Top, WizardStep};
 use super::fields::Kind;
 use crate::ghostty::{ThemeColors, theme_colors};
 use crate::profile::{Profile, hex_rgb};
@@ -149,7 +149,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Shaders => draw_shaders(f, body, app),
     }
     draw_footer(f, footer, app);
-    if app.input.is_some() {
+    if app.wizard.is_some() {
+        draw_wizard(f, app);
+    } else if app.input.is_some() {
         draw_input(f, app);
     }
 }
@@ -172,12 +174,18 @@ fn highlight() -> Style {
 fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
     let [left, right] = halves(area);
     let mark = |on: bool| Span::styled(if on { "● " } else { "  " }, Style::default().fg(ACCENT));
-    let mut items: Vec<ListItem> =
-        vec![ListItem::new(Line::from(vec![mark(app.active.is_none()), Span::styled("(none)", dim())]))];
+    let mut items: Vec<ListItem> = vec![
+        ListItem::new(Line::styled("+ New profile", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))),
+        ListItem::new(Line::from(vec![mark(app.active.is_none()), Span::styled("(none)", dim())])),
+    ];
     items.extend(app.profiles.iter().map(|n| {
         ListItem::new(Line::from(vec![mark(app.active.as_deref() == Some(n.as_str())), Span::raw(n.clone())]))
     }));
-    let row = if app.none_selected { 0 } else { app.sel + 1 };
+    let row = match app.top {
+        Some(Top::New) => 0,
+        Some(Top::None) => 1,
+        None => app.sel + 2,
+    };
     let mut st = ListState::default().with_selected(Some(row));
     f.render_stateful_widget(
         List::new(items).block(list_block("Profiles (● = active)")).highlight_style(highlight()),
@@ -185,16 +193,33 @@ fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
         &mut st,
     );
 
-    if app.none_selected {
-        let on = app.active.is_none();
-        let text = vec![
-            Line::from(if on { "No profile is active." } else { "Enter turns the active profile off." }),
-            Line::raw(""),
-            Line::from("Your own Ghostty config is what applies while no profile is active."),
-            Line::styled("Pick a profile and press Enter to apply it again. u does the same from any row.", dim()),
-        ];
-        f.render_widget(Paragraph::new(text).block(list_block("(none)")).wrap(Wrap { trim: true }), right);
-        return;
+    match app.top {
+        Some(Top::New) => {
+            let text = vec![
+                Line::from("Make a new profile (Enter, or press n anywhere)."),
+                Line::raw(""),
+                Line::from("You type a name, then choose what it starts from:"),
+                Line::from("  1  your current Ghostty setup"),
+                Line::from("  2  a copy of the profile you had selected"),
+                Line::from("  3  blank"),
+                Line::raw(""),
+                Line::styled("A new profile is never applied until you press Enter on it.", dim()),
+            ];
+            f.render_widget(Paragraph::new(text).block(list_block("New profile")).wrap(Wrap { trim: true }), right);
+            return;
+        }
+        Some(Top::None) => {
+            let on = app.active.is_none();
+            let text = vec![
+                Line::from(if on { "No profile is active." } else { "Enter turns the active profile off." }),
+                Line::raw(""),
+                Line::from("Your own Ghostty config is what applies while no profile is active."),
+                Line::styled("Pick a profile and press Enter to apply it again. u does the same from any row.", dim()),
+            ];
+            f.render_widget(Paragraph::new(text).block(list_block("(none)")).wrap(Wrap { trim: true }), right);
+            return;
+        }
+        None => {}
     }
     match &app.profile {
         Some(p) => {
@@ -209,7 +234,7 @@ fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
             preview(f, right, &p.name, &Colors::from_profile(p), extra);
         }
         None => f.render_widget(
-            Paragraph::new("No profiles yet. Press p to install the presets, or n to create one.")
+            Paragraph::new("No profiles yet. Press n to make one, or p to install the presets.")
                 .block(list_block("Preview"))
                 .wrap(Wrap { trim: true }),
             right,
@@ -330,7 +355,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let color = if app.status.ok { Color::Green } else { Color::Red };
     let help = match app.tab {
         Tab::Profiles => {
-            "↑↓ select · Enter apply · u off (none) · n new · d delete · e export · p presets · ctrl+r reload · q quit"
+            "Enter apply · n new profile · d delete · e export · u off · p presets · ctrl+r reload · q quit"
         }
         Tab::Themes => "↑↓ select · / filter · Enter bake into profile · Esc clear · Tab next · q quit",
         Tab::Edit => "↑↓ select · Enter edit · ←→ cycle · x unset · Tab next · ctrl+r reload · q quit",
@@ -365,6 +390,74 @@ fn draw_input(f: &mut Frame, app: &App) {
                 .title(format!(" {} ", input.title))
                 .border_style(Style::default().fg(ACCENT)),
         ),
+        r,
+    );
+}
+
+fn draw_wizard(f: &mut Frame, app: &App) {
+    let Some(w) = &app.wizard else { return };
+    let area = f.area();
+    let width = area.width.saturating_sub(4).min(78);
+    let (title, lines) = match w.step {
+        WizardStep::Base(sel) => {
+            let copy = match &w.copy_from {
+                Some(n) => format!("a copy of '{n}'"),
+                None => "a copy of the selected profile (none selected)".to_string(),
+            };
+            let opts = ["1  your current Ghostty setup", &format!("2  {copy}"), "3  blank"];
+            let mut lines: Vec<Line> = opts
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    let style = if i == sel {
+                        highlight()
+                    } else if i == 1 && w.copy_from.is_none() {
+                        dim()
+                    } else {
+                        Style::default()
+                    };
+                    Line::styled(format!(" {o} "), style)
+                })
+                .collect();
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                match sel {
+                    0 => "Moves your look out of your Ghostty config into the profile (backed up).",
+                    1 => "Starts with the same settings as that profile.",
+                    _ => "Starts empty; fill it in on the Edit tab.",
+                },
+                dim(),
+            ));
+            lines.push(Line::styled("1-3 or Enter choose · ↑↓ move · Esc cancel · the profile is NOT applied", dim()));
+            (format!(" New profile '{}': start from ", w.name), lines)
+        }
+        WizardStep::ConfirmAdopt => (
+            format!(" Use your current Ghostty setup for '{}'? ", w.name),
+            vec![
+                Line::from("This MOVES your appearance settings (colors, fonts, cursor, opacity,"),
+                Line::from("shaders, background) out of your Ghostty config into the new profile."),
+                Line::from("Keybinds and other settings stay. Backups: *.bak-pre-ghostty-profiles"),
+                Line::raw(""),
+                Line::styled(
+                    "Until you apply it (Enter on the profile), a reload shows defaults.",
+                    Style::default().fg(Color::Yellow),
+                ),
+                Line::raw(""),
+                Line::styled("y  confirm · Esc cancel · any other key goes back", dim()),
+            ],
+        ),
+    };
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let r = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width,
+        height: h,
+    };
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT))),
         r,
     );
 }
