@@ -168,6 +168,7 @@ copied into the profile only when you select it, and the cursor on one that is n
 | `ansi-donut` | the classic spinning ASCII donut, drawn in the shader as a grid of characters (phosphor, amber, white, cyan, magenta, ansi-16); size, position, spin axes and character size are parameters |
 | `ps4-polygons` | slowly drifting translucent low-poly facets with a soft blue glow, two parallax layers (ps4-blue, twilight, ice) |
 | `ps5-light` | wide soft beams of white-blue light that sway slowly, floating particles, an optional iridescent tint (home, pearl, midnight) |
+| `ps3-visualizer` | a looping flight over landscapes: green hills, a looming valley, open water, silk, a colour wash and a tunnel, crossfading every ~30 s (`scene` locks one; `speed` sets the flight speed) |
 
 All of them are original code. `enchant-glyphs` draws the 26 letters of the Standard Galactic Alphabet (a constructed alphabet created for the
 Commander Keen games, with one symbol per Latin letter; it is what Minecraft's enchanting table displays) from **hand-built stroke data**
