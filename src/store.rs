@@ -1449,13 +1449,13 @@ mod removed_shader_tests {
         let conf = fs::read_to_string(dir.join("profile.conf")).unwrap();
         fs::write(
             dir.join("profile.conf"),
-            format!("{conf}\ncustom-shader = shaders/ps3-visualizer.glsl\ncustom-shader-animation = true\n"),
+            format!("{conf}\ncustom-shader = shaders/retired-shader.glsl\ncustom-shader-animation = true\n"),
         )
         .unwrap();
-        assert!(crate::presets::shader_source("ps3-visualizer.glsl").is_none(), "the shader is gone from the library");
+        assert!(crate::presets::shader_source("retired-shader.glsl").is_none(), "the shader is gone from the library");
         let (active, notes) = s.apply_noted("old").unwrap();
         assert_eq!(notes.len(), 1, "{notes:?}");
-        assert!(notes[0].contains("ps3-visualizer.glsl") && notes[0].contains("no longer available"), "{notes:?}");
+        assert!(notes[0].contains("retired-shader.glsl") && notes[0].contains("no longer available"), "{notes:?}");
         let rendered = fs::read_to_string(active).unwrap();
         assert!(!rendered.contains("ps3-visualizer"), "no dead shader path reaches Ghostty:\n{rendered}");
         assert!(!rendered.contains("custom-shader"), "{rendered}");
@@ -1468,14 +1468,14 @@ mod removed_shader_tests {
         let kdir = s.profiles_dir().join("kept");
         fs::create_dir_all(kdir.join("shaders")).unwrap();
         fs::write(
-            kdir.join("shaders/ps3-visualizer.glsl"),
+            kdir.join("shaders/retired-shader.glsl"),
             "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }\n",
         )
         .unwrap();
         let conf = fs::read_to_string(kdir.join("profile.conf")).unwrap();
-        fs::write(kdir.join("profile.conf"), format!("{conf}\ncustom-shader = shaders/ps3-visualizer.glsl\n")).unwrap();
+        fs::write(kdir.join("profile.conf"), format!("{conf}\ncustom-shader = shaders/retired-shader.glsl\n")).unwrap();
         let (_, notes) = s.apply_noted("kept").unwrap();
         assert!(notes.is_empty(), "{notes:?}");
-        assert!(fs::read_to_string(s.paths.active_conf()).unwrap().contains("ps3-visualizer.glsl"));
+        assert!(fs::read_to_string(s.paths.active_conf()).unwrap().contains("retired-shader.glsl"));
     }
 }

@@ -1359,3 +1359,84 @@ fn the_ascii_donut_is_lit_from_the_top_of_the_window_stays_in_its_box_and_spins(
     }
     assert!(hues.len() >= 4, "ansi-16 uses several colors: {hues:?}");
 }
+
+/// How much the average brightness varies from row to row, and from column to column (standard deviations of the
+/// row means and of the column means): a horizon or horizontal streaks vary mostly down the picture.
+fn row_col_change(out: &[u8], w: u32, h: u32) -> (f32, f32) {
+    let l = |x: u32, y: u32| lum(&out[((y * w + x) * 4) as usize..]);
+    let sd = |v: Vec<f32>| {
+        let m = v.iter().sum::<f32>() / v.len() as f32;
+        (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len() as f32).sqrt()
+    };
+    let rows = (0..h).map(|y| (0..w).map(|x| l(x, y)).sum::<f32>() / w as f32).collect();
+    let cols = (0..w).map(|x| (0..h).map(|y| l(x, y)).sum::<f32>() / h as f32).collect();
+    (sd(rows), sd(cols))
+}
+
+fn band_mean(out: &[u8], w: u32, y0: u32, y1: u32) -> [f32; 3] {
+    let mut s = [0.0f32; 3];
+    for y in y0..y1 {
+        for x in 0..w {
+            for c in 0..3 {
+                s[c] += out[((y * w + x) * 4) as usize + c] as f32 / 255.0;
+            }
+        }
+    }
+    let n = ((y1 - y0) * w) as f32;
+    s.map(|v| v / n)
+}
+
+/// The playlist visualizer's six scenes must hold their orientation at any window shape: the sky stays at the top,
+/// the horizon and the silk streaks stay horizontal, and nothing is stretched into a different picture.
+#[test]
+fn every_visualizer_scene_keeps_its_orientation_at_any_aspect_ratio() {
+    let g = gpu_or_skip!();
+    let src = library().into_iter().find(|(n, _)| n.starts_with("ps3-visualizer")).expect("visualizer").1;
+    let shapes: [(u32, u32); 5] = [(320, 180), (240, 180), (200, 200), (112, 200), (360, 120)];
+    let scenes = ["hills", "valley", "water", "silk", "wash", "tunnel"];
+    for (i, scene) in scenes.iter().enumerate() {
+        let mut values = BTreeMap::new();
+        values.insert("scene".to_string(), (i + 1).to_string());
+        for (w, h) in shapes {
+            let frame = bg_frame(w, h);
+            for t in [4.0, 19.0] {
+                let out = render_sized(&g, &rendered(&src, &values), &frame, w, h, t);
+                let (rows, cols) = row_col_change(&out, w, h);
+                let top = band_mean(&out, w, 0, h / 4);
+                let bottom = band_mean(&out, w, h * 3 / 4, h);
+                let tag = format!("{scene} {w}x{h} t={t}");
+                match *scene {
+                    // a horizon: brightness changes down the picture much more than across it, with the sky above
+                    "water" => {
+                        assert!(rows > cols, "{tag}: horizon not horizontal ({rows} vs {cols})");
+                        assert!(top[0] + top[1] + top[2] > bottom[0] + bottom[1] + bottom[2], "{tag}: sky not on top");
+                    }
+                    // hills: the ridge line wanders, so only the sky position is checked
+                    "hills" => {
+                        assert!(top[2] - top[0] > bottom[2] - bottom[0], "{tag}: sky not on top");
+                    }
+                    // silk: long horizontal streaks
+                    "silk" => assert!(rows > cols, "{tag}: streaks not horizontal ({rows} vs {cols})"),
+                    // the valley's sky is a V at the top centre: the picture must not be flipped or rotated, so the
+                    // top-centre / bottom-centre brightness relationship is the same one it has at 16:9
+                    "valley" => {
+                        let centre = |y0, y1| {
+                            let m: Vec<u8> = (y0..y1)
+                                .flat_map(|y| (w * 2 / 5..w * 3 / 5).flat_map(move |x| [(y * w + x) as usize]))
+                                .flat_map(|i| {
+                                    let p = &out[i * 4..i * 4 + 3];
+                                    [p[2].saturating_sub(p[0])]
+                                })
+                                .collect();
+                            m.iter().map(|&v| v as f32).sum::<f32>() / m.len() as f32
+                        };
+                        let sky = centre(0, h / 6);
+                        let floor = centre(h * 5 / 6, h);
+                        assert!(sky > floor, "{tag}: sky not at top centre ({sky} vs {floor})");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
