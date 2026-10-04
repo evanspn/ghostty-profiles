@@ -117,11 +117,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float len = 3.0 + floor(hash21(vec2(blk + 5.0, row)) * 5.0);
     float inWord = hasWord * step(start, posInBlk) * step(posInBlk, start + len - 1.0);
 
-    int letter = int(min(floor(hash21(id + 3.0) * 26.0), 25.0));
-    vec2 u = (q - vec2(0.14)) / 0.72 * 12.0;
-    float d = sga_dist(u, letter);
-    float core = 1.0 - smoothstep(1.15, 1.85, d);
-    float glow = exp(-d * 0.45) * 0.30;
+    // the stroke distance is the expensive part: only cells inside a word need it (elsewhere the glyph is multiplied by zero)
+    float core = 0.0;
+    float glow = 0.0;
+    if (inWord > 0.0) {
+        int letter = int(min(floor(hash21(id + 3.0) * 26.0), 25.0));
+        vec2 u = (q - vec2(0.14)) / 0.72 * 12.0;
+        float d = sga_dist(u, letter);
+        core = 1.0 - smoothstep(1.15, 1.85, d);
+        glow = exp(-d * 0.45) * 0.30;
+    }
     // a word fades in and out as it floats, and each glyph shimmers
     float life = 0.55 + 0.45 * sin(t * 3.0 + hb * 40.0);
     float shimmer = 0.8 + 0.2 * sin(iTime * (3.0 + 4.0 * hash21(id)) + hash21(id + 1.0) * 20.0);

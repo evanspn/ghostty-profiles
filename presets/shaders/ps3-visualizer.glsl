@@ -92,9 +92,11 @@ vec3 hills(vec2 p, float z, float t, float audio) {
         vec3 pos = ro + rd * tt;
         float d = pos.y - hillsH(pos.xz, tt);
         if (d < 0.004 * tt) { hit = true; break; }
-        // steps grow with distance, so the march reaches a true horizon in few steps
-        tt += clamp(d * 0.6 + 0.045 * tt, 0.05, 40.0);
-        if (tt > 260.0 || (rd.y > 0.0 && pos.y > 24.0)) { open = true; break; }
+        // steps grow with distance, so the march reaches a true horizon in few steps; it stops at 170 m, where the haze is
+        // already 99.4% (the far ground beyond is fog of the horizon colour either way)
+        tt += clamp(d * 0.8 + 0.045 * tt, 0.05, 40.0);
+        // the ground is never higher than 10.2 (3.8 + 1.9 + 0.5 + a 4.0 mound): a rising ray above that can no longer hit it
+        if (tt > 170.0 || (rd.y > 0.0 && pos.y > 10.25)) { open = true; break; }
     }
     // a ray that used up its steps without leaving the terrain is far ground too (hazed like the rest), never a slit of sky
     if (!hit && !open) hit = true;
@@ -109,12 +111,12 @@ vec3 hills(vec2 p, float z, float t, float audio) {
     if (hit) {
         vec3 pos = ro + rd * min(tt, 260.0);
         float e = 0.12 + tt * 0.02;
-        vec3 n = normalize(vec3(hillsH(pos.xz - vec2(e, 0.0), tt) - hillsH(pos.xz + vec2(e, 0.0), tt), 2.0 * e,
-                                hillsH(pos.xz - vec2(0.0, e), tt) - hillsH(pos.xz + vec2(0.0, e), tt)));
+        // forward differences from the height already needed for the colour: three samples instead of five
+        float h = hillsH(pos.xz, tt);
+        vec3 n = normalize(vec3(h - hillsH(pos.xz + vec2(e, 0.0), tt), e, h - hillsH(pos.xz + vec2(0.0, e), tt)));
         float diff = clamp(0.35 + 0.8 * dot(n, normalize(vec3(-0.4, 0.8, -0.3))), 0.0, 1.0);
         vec3 dark = vec3(0.04, 0.14, 0.04);
         vec3 light = vec3(0.40, 0.58, 0.17);
-        float h = hillsH(pos.xz, tt);
         vec3 grass = mix(dark, light, clamp(diff * 0.85 + 0.2 * h / 9.0, 0.0, 1.0));
         // near-field texture that rushes past: grass tufts and drifts at three scales
         float nearK = 1.0 - smoothstep(10.0, 70.0, tt);
@@ -138,16 +140,18 @@ float valleyC(float z) { return 7.0 * sin(z * 0.025) + 3.0 * sin(z * 0.067 + 1.3
 
 float valleyH(vec2 q, float rough) {
     float x = q.x - valleyC(q.y);
+    float ax = abs(x);
     // walls rise from the floor over a few units to a plateau, higher on the left than the right, so the skyline is a V that
-    // runs into the vanishing point instead of a bowl
-    float wallL = 4.6 + 2.0 * vnoise(vec2(q.y * 0.05, 3.0));
-    float wallR = 3.4 + 2.0 * vnoise(vec2(q.y * 0.045, 9.0));
-    float wall = x < 0.0 ? wallL : wallR;
-    float w = smoothstep(0.4, 5.5, abs(x));
-    float h = wall * (w * w * (1.5 - 0.5 * w));
-    h += 1.2 * vnoise(q * vec2(0.11, 0.08)) * smoothstep(1.0, 8.0, abs(x));
+    // runs into the vanishing point instead of a bowl (only the side the point is on is evaluated, and no term whose weight is zero)
+    float h = 0.0;
+    if (ax > 0.4) {
+        float wall = x < 0.0 ? 4.6 + 2.0 * vnoise(vec2(q.y * 0.05, 3.0)) : 3.4 + 2.0 * vnoise(vec2(q.y * 0.045, 9.0));
+        float w = smoothstep(0.4, 5.5, ax);
+        h = wall * (w * w * (1.5 - 0.5 * w));
+    }
+    if (ax > 1.0) h += 1.2 * vnoise(q * vec2(0.11, 0.08)) * smoothstep(1.0, 8.0, ax);
     // a rough, crumbly crest along the top of the walls
-    h += rough * 1.7 * (vnoise(q * vec2(0.55, 0.45)) - 0.5) * smoothstep(3.0, 8.0, abs(x));
+    if (ax > 3.0) h += rough * 1.7 * (vnoise(q * vec2(0.55, 0.45)) - 0.5) * smoothstep(3.0, 8.0, ax);
     return h;
 }
 
