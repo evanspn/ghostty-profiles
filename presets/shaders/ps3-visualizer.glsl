@@ -113,7 +113,7 @@ vec3 hills(vec2 p, float z, float t, float audio) {
         grass *= 0.9 + 0.12 * streak;
         grass *= mix(1.0, 0.5, exp(-p.x * p.x * 6.0) * smoothstep(0.0, 0.14, horizon - p.y));
         // atmospheric haze: by a few hundred metres the ground is the colour of the sky at the horizon, with no edge
-        float fog = 1.0 - exp(-tt * 0.011);
+        float fog = 1.0 - exp(-tt * 0.017);
         col = mix(grass, skyLow, fog);
     }
     col *= 1.0 + 0.12 * audio;
@@ -121,7 +121,8 @@ vec3 hills(vec2 p, float z, float t, float audio) {
 }
 
 // ---- 2: the dark valley with cyan-lit crests --------------------------------------------------------------
-float valleyC(float z) { return 0.5 * sin(z * 0.02) + 0.25 * sin(z * 0.051 + 1.3); }
+// the valley winds in a long S, so its far end is always round a bend and lost in haze, never a visible end
+float valleyC(float z) { return 7.0 * sin(z * 0.025) + 3.0 * sin(z * 0.067 + 1.3); }
 
 float valleyH(vec2 q, float rough) {
     float x = q.x - valleyC(q.y);
@@ -140,23 +141,25 @@ float valleyH(vec2 q, float rough) {
 
 vec3 valley(vec2 p, float z, float t, float audio) {
     vec3 ro = vec3(valleyC(z) + 0.7 * sin(t * 0.23) + 0.4 * sin(t * 0.51), 0.85 + 0.1 * sin(t * 0.37), z);
-    vec3 rd = normalize(vec3(p.x * 1.4 + 0.04 * sin(t * 0.31), (p.y - 0.10) * 1.4, 1.0));
+    // look along the valley a little way ahead, so the bends sweep past rather than the walls running into the camera
+    float yaw = 0.8 * (valleyC(z + 30.0) - valleyC(z)) / 30.0;
+    vec3 rd = normalize(vec3(p.x * 1.4 + yaw + 0.04 * sin(t * 0.31), (p.y - 0.10) * 1.4, 1.0));
     float tt = 0.3;
-    float minClear = 1e3;
+    float haloAcc = 0.0;
     bool hit = false;
     for (int i = 0; i < 34; i++) {
         vec3 pos = ro + rd * tt;
         float d = pos.y - valleyH(pos.xz, 0.6);
         // only the walls make a glowing silhouette, not a ray skimming the far floor
-        if (pos.y > 1.8) minClear = min(minClear, d / tt);
+        haloAcc = max(haloAcc, exp(-max(d / tt, 0.0) * 45.0) * smoothstep(1.0, 3.2, pos.y));
         if (d < 0.003 * tt) { hit = true; break; }
         tt += clamp(d * 0.6 + 0.025 * tt, 0.02, 40.0);
         if (tt > 900.0 || (rd.y > 0.0 && pos.y > 10.0)) break;
     }
-    float skyT = clamp(rd.y * 3.0 + 0.2, 0.0, 1.0);
-    vec3 col = mix(P_sky * 1.5, P_sky * 0.75, pow(skyT, 0.6));
-    vec3 skyCol = col;
-    float haze = 1.0 - exp(-tt * 0.012);
+    vec3 col = mix(P_sky * 1.0, P_sky * 0.7, smoothstep(0.0, 0.5, rd.y));
+    // distance haze fades to the sky colour AT the horizon, which is also the colour of the sky just above it
+    vec3 skyCol = P_sky * 1.0;
+    float haze = 1.0 - exp(-tt * 0.02);
     if (hit) {
         vec3 pos = ro + rd * tt;
         float e = 0.04 + tt * 0.01;
@@ -177,11 +180,18 @@ vec3 valley(vec2 p, float z, float t, float audio) {
         col = mix(lit, skyCol, haze);
     }
     // a ray that skims the far floor without landing is the dark road running to the vanishing point, not sky
+    bool farFloor = false;
     if (!hit && rd.y < 0.0) {
-        col = skyCol;
+        farFloor = true;
+        // far floor the march did not reach: the same dark floor, hazed by its (flat-ground) distance, so it joins the nearer hits seamlessly
+        float dist = max(tt, 0.85 / max(-rd.y, 1e-3));
+        col = mix((P_ground * 2.2 + P_rim * 0.04) * 0.9, skyCol, 1.0 - exp(-dist * 0.02));
+        // and exactly at the horizon it is the sky itself, so there is no line where the ground stops
+        col = mix(skyCol, col, smoothstep(0.0, 0.06, -rd.y));
         hit = true;
     }
-    float halo = exp(-max(minClear, 0.0) * 45.0) * (hit ? 0.0 : 1.0);
+    // the glow along the far crests carries on into the far floor and fades out below the horizon, so it has no edge there either
+    float halo = haloAcc * ((hit && !farFloor) ? 0.0 : 1.0) * (1.0 - smoothstep(0.0, 0.06, -rd.y));
     col += P_rim * P_glow * halo * 0.75 * (1.0 + 0.6 * audio);
     return col;
 }

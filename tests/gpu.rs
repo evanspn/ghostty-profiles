@@ -1482,3 +1482,57 @@ fn the_far_ground_fades_into_the_sky_without_a_hard_edge_in_every_scene() {
         }
     }
 }
+
+/// The biggest group of touching pixels that all have exactly the same colour, in the band around the horizon (a flat
+/// "end of the world" block is one; haze, rock and sky gradients are not).
+fn largest_flat_region(out: &[u8], w: u32, h: u32) -> usize {
+    let (y0, y1) = (h * 41 / 100, h * 70 / 100);
+    let px = |x: u32, y: u32| {
+        [out[((y * w + x) * 4) as usize], out[((y * w + x) * 4) as usize + 1], out[((y * w + x) * 4) as usize + 2]]
+    };
+    let mut seen = vec![false; (w * h) as usize];
+    let mut best = 0;
+    for sy in y0..y1 {
+        for sx in 0..w {
+            if seen[(sy * w + sx) as usize] {
+                continue;
+            }
+            let c = px(sx, sy);
+            let mut stack = vec![(sx, sy)];
+            seen[(sy * w + sx) as usize] = true;
+            let mut n = 0;
+            while let Some((x, y)) = stack.pop() {
+                n += 1;
+                for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                    if nx < w && ny >= y0 && ny < y1 && !seen[(ny * w + nx) as usize] && px(nx, ny) == c {
+                        seen[(ny * w + nx) as usize] = true;
+                        stack.push((nx, ny));
+                    }
+                }
+            }
+            best = best.max(n);
+        }
+    }
+    best
+}
+
+/// Where the valley runs away to the vanishing point there must be no flat block of one colour (the old "end of the world"):
+/// the far floor and the sky haze blend into each other instead of one stopping at a hard edge.
+#[test]
+fn the_valley_runs_to_the_horizon_with_no_flat_block_at_its_far_end() {
+    let g = gpu_or_skip!();
+    let src = library().into_iter().find(|(n, _)| n.starts_with("ps3-visualizer")).expect("visualizer").1;
+    let mut values = BTreeMap::new();
+    values.insert("scene".to_string(), "2".to_string());
+    for (w, h) in [(320u32, 180u32), (112, 200), (200, 200)] {
+        for t in [3.0, 17.0, 29.0, 61.0] {
+            let out = render_sized(&g, &rendered(&src, &values), &bg_frame(w, h), w, h, t);
+            let n = largest_flat_region(&out, w, h);
+            eprintln!("valley {w}x{h} t={t}: {n} px of {}", w * h);
+            assert!(
+                n * 1000 < (w * h) as usize * 4,
+                "valley {w}x{h} t={t}: a flat block of {n} px at the far end (the limit is 0.4% of the picture)"
+            );
+        }
+    }
+}
