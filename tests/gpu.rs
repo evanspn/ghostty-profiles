@@ -55,7 +55,11 @@ struct Gpu {
 }
 
 fn gpu() -> Option<Gpu> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    // wgpu panics when the build has no usable backend (e.g. a Linux CI runner with only the Metal backend compiled in):
+    // treat that as "no GPU" so the tests skip with a message instead of failing.
+    let instance =
+        std::panic::catch_unwind(|| wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()))
+            .ok()?;
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
     Some(Gpu { device, queue })
