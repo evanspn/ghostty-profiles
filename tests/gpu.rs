@@ -1543,7 +1543,7 @@ fn hills_horizon_row(out: &[u8], w: u32, h: u32) -> i32 {
     for x in (w / 2 - 4)..(w / 2 + 4) {
         let mut found = -1;
         for y in 0..h - 14 {
-            let terrain = (0..12).step_by(3).all(|k| out[(((y + k) * w + x) * 4) as usize + 2] < 90);
+            let terrain = (0..12).step_by(3).all(|k| out[(((y + k) * w + x) * 4) as usize + 2] < 70);
             if terrain {
                 found = y as i32;
                 break;
@@ -1645,7 +1645,37 @@ fn every_scene_keeps_its_detail_after_hours_and_days() {
         for base in [100_000.0f32, 1_000_000.0] {
             let later = mean([base, base + 11.0, base + 27.0, base + 43.0]);
             eprintln!("{scene}: start {start:.4}, at {base}: {later:.4}");
-            assert!(later > 0.6 * start && later < 1.6 * start, "{scene} at t={base}: detail {later} vs {start} at the start");
+            assert!(
+                later > 0.6 * start && later < 1.6 * start,
+                "{scene} at t={base}: detail {later} vs {start} at the start"
+            );
         }
     }
+}
+
+/// A cross-fade must be a change of picture, not a step in light: every scene has about the same average brightness.
+#[test]
+fn the_scenes_have_matching_average_brightness_so_crossfades_do_not_lurch() {
+    let g = gpu_or_skip!();
+    let src = library().into_iter().find(|(n, _)| n.starts_with("ps3-visualizer")).expect("visualizer").1;
+    let (w, h) = (160u32, 90u32);
+    let frame = bg_frame(w, h);
+    let mut means = Vec::new();
+    for (i, scene) in ["hills", "valley", "water", "silk", "wash", "tunnel"].iter().enumerate() {
+        let mut values = BTreeMap::new();
+        values.insert("scene".to_string(), (i + 1).to_string());
+        let shader = rendered(&src, &values);
+        let m = [3.0f32, 17.0, 29.0, 41.0, 53.0, 67.0]
+            .iter()
+            .map(|&t| {
+                let out = render_sized(&g, &shader, &frame, w, h, t);
+                out.chunks(4).map(lum).sum::<f32>() / (w * h) as f32
+            })
+            .sum::<f32>()
+            / 6.0;
+        eprintln!("{scene}: mean brightness {:.0}/255", m * 255.0);
+        means.push(m);
+    }
+    let (lo, hi) = (means.iter().cloned().fold(1.0, f32::min), means.iter().cloned().fold(0.0, f32::max));
+    assert!(hi < 1.35 * lo, "scene brightness ranges {lo}..{hi}: a cross-fade would lurch");
 }

@@ -119,10 +119,10 @@ vec3 hills(vec2 p, float z, float t, float audio) {
         // near-field texture that rushes past: grass tufts and drifts at three scales
         float nearK = 1.0 - smoothstep(10.0, 70.0, tt);
         float tex = vnoise(pos.xz * 1.6) * 0.5 + vnoise(pos.xz * 0.5 + 3.0) * 0.35 + vnoise(pos.xz * 4.0) * 0.15;
-        grass *= 0.78 + 0.4 * mix(0.5, tex, nearK);
+        grass *= 0.86 + 0.24 * mix(0.5, tex, nearK);
         float streak = vnoise(vec2(ang * 20.0, log(r + 0.05) * 0.9 + z * 0.02));
-        grass *= 0.9 + 0.12 * streak;
-        grass *= mix(1.0, 0.5, exp(-p.x * p.x * 6.0) * smoothstep(0.0, 0.14, horizon - p.y));
+        grass *= 0.94 + 0.08 * streak;
+        grass *= mix(1.0, 0.7, exp(-p.x * p.x * 6.0) * smoothstep(0.0, 0.14, horizon - p.y));
         // atmospheric haze: by a few hundred metres the ground is the colour of the sky at the horizon, with no edge
         // (a power law: clear near the camera, hazy by 60 m, gone by 150 m; the far crests the march cannot resolve are already sky)
         float fog = 1.0 - exp(-pow(tt / 65.0, 1.7));
@@ -239,7 +239,10 @@ vec3 waterSky(float y, vec3 sunDir, vec3 dir) {
 }
 
 vec3 water(vec2 p, float z, float t, float audio) {
-    float camY = 0.9;
+    // slow and soft: half the forward speed of the other scenes, the wave clock at half rate, a little higher above the water
+    z *= 0.5;
+    t *= 0.5;
+    float camY = 1.3;
     vec3 rd = normalize(vec3(p.x * 1.4 + 0.02 * sin(t * 0.2), (p.y - 0.17) * 1.4, 1.0));
     vec3 sun = normalize(vec3(0.05, 0.22, 1.0));
     if (rd.y >= -0.002) return waterSky(rd.y, sun, rd);
@@ -248,26 +251,26 @@ vec3 water(vec2 p, float z, float t, float audio) {
     // ripple rings spreading from a point ahead, and wave trains travelling toward the camera
     vec2 c0 = vec2(0.0, z + 9.0);
     float rr = length(q - c0);
-    float ring = sin(rr * 2.8 - t * 1.6) * exp(-rr * 0.045);
+    float ring = sin(rr * 2.2 - t * 1.6) * exp(-rr * 0.045);
     float att = 1.0 / (1.0 + tt * 0.025);
     vec2 ph1 = vec2(0.7, 0.55) * 1.5, ph2 = vec2(-0.6, 0.8) * 2.4, ph3 = vec2(0.1, 1.0) * 3.4;
     float c1 = cos(dot(q, ph1) + t * 1.3), c2 = cos(dot(q, ph2) - t * 1.1), c3 = cos(dot(q, ph3) + t * 1.7);
     float e = 0.12;
     float n0 = waveNoise(q, t);
-    vec2 slope = 0.30 * c1 * ph1 + 0.20 * c2 * ph2 + 0.10 * c3 * ph3
-               + 0.9 * vec2(waveNoise(q + vec2(e, 0.0), t) - n0, waveNoise(q + vec2(0.0, e), t) - n0) / e
-               + 0.55 * ring * (q - c0) / max(rr, 0.1);
+    vec2 slope = 0.17 * c1 * ph1 + 0.11 * c2 * ph2 + 0.05 * c3 * ph3
+               + 0.5 * vec2(waveNoise(q + vec2(e, 0.0), t) - n0, waveNoise(q + vec2(0.0, e), t) - n0) / e
+               + 0.28 * ring * (q - c0) / max(rr, 0.1);
     vec3 n = normalize(vec3(-slope.x * att, 1.0, -slope.y * att));
     vec3 refl = reflect(rd, n);
     refl.y = abs(refl.y);
     vec3 rsky = waterSky(refl.y, sun, refl);
-    float fres = 0.03 + 0.97 * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 4.0);
+    float fres = 0.04 + 0.90 * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.5);
     // the water itself: deep teal-blue near the camera, lighter where the light gets through the crests
     float crest = clamp(0.5 + 3.0 * (n0 - 0.5), 0.0, 1.0);
     vec3 body = mix(vec3(0.01, 0.16, 0.24), vec3(0.04, 0.40, 0.50), crest * att);
     vec3 col = mix(body, rsky, clamp(fres, 0.0, 1.0));
     // glints where a wave face turns toward the sun, and soft light streaks just under the surface
-    col += vec3(1.0, 0.96, 0.85) * pow(max(dot(refl, sun), 0.0), 220.0) * (3.0 + 2.0 * audio);
+    col += vec3(1.0, 0.96, 0.85) * pow(max(dot(refl, sun), 0.0), 120.0) * (0.9 + 0.5 * audio);
     col += vec3(0.20, 0.55, 0.65) * pow(crest, 4.0) * 0.35 * att;
     float fog = 1.0 - exp(-tt * 0.03);
     return mix(col, vec3(0.80, 0.90, 0.95), fog);
@@ -346,14 +349,16 @@ int digitAt(float pl, int k, int nd) {
     return int(d - 10.0 * floor(d / 10.0));
 }
 
+// Every scene is brought to about the same average brightness (measured: hills 101, valley 36, water 109, silk 58, wash 71,
+// tunnel 37 out of 255 before this), so a cross-fade is a change of picture and never a step in light.
 vec3 renderScene(int id, vec2 p, float ts, float t, float audio) {
     float z = (ts + float(id) * 37.0) * (P_speed * 6.0) + audio * 0.6;
-    if (id == 1) return hills(p, z, t, audio);
-    if (id == 2) return valley(p, z, t, audio);
-    if (id == 3) return water(p, z, t, audio);
-    if (id == 4) return silk(p, t, audio);
-    if (id == 5) return wash(p, t, audio);
-    return tunnel(p, z * 0.6, t, audio);
+    if (id == 1) return 0.65 * hills(p, z, t, audio);
+    if (id == 2) return 1.5 * valley(p, z, t, audio);
+    if (id == 3) return 0.57 * water(p, z, t, audio);
+    if (id == 4) return 1.12 * silk(p, t, audio);
+    if (id == 5) return 0.95 * wash(p, t, audio);
+    return 1.6 * tunnel(p, z * 0.6, t, audio);
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
