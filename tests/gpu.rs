@@ -451,7 +451,12 @@ fn library() -> Vec<(String, String)> {
 }
 
 fn context(image: bool) -> shaderparams::RenderContext {
-    shaderparams::RenderContext { opacity_scale: 1.0, background: TEST_BG, background_image: image }
+    shaderparams::RenderContext {
+        opacity_scale: 1.0,
+        background: TEST_BG,
+        background_image: image,
+        ghostty_uniforms: false,
+    }
 }
 
 fn rendered(src: &str, values: &BTreeMap<String, String>) -> String {

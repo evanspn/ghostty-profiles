@@ -309,6 +309,9 @@ impl Store {
         atomic_write(&conf, &prof.render())?;
         atomic_write(&self.paths.active_file(), name)?;
         self.ensure_linked()?;
+        // a clock look starts the shells' palette clock; any other look stops it
+        let mut notes = notes;
+        notes.extend(crate::clock::sync(&self.paths, prof.uses_palette_clock())?);
         Ok((conf, notes))
     }
 
@@ -326,6 +329,7 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
+        crate::clock::sync(&self.paths, false)?;
         Ok(was_active)
     }
 
@@ -339,6 +343,10 @@ impl Store {
                 }
                 prof.render_shaders()?;
                 atomic_write(&self.paths.active_conf(), &prof.render())?;
+                // the shader may have been switched to or away from the clock (the startup file is only hooked by apply)
+                if !prof.uses_palette_clock() || self.paths.shell_rc().is_none_or(crate::clock::is_hooked) {
+                    crate::clock::sync(&self.paths, prof.uses_palette_clock())?;
+                }
                 Ok(true)
             }
             None => Ok(false),
@@ -390,9 +398,9 @@ impl Store {
         Ok(true)
     }
 
-    /// Remove the include line (and its comment) again. True if anything changed.
+    /// Remove the include line (and its comment) again, and the palette clock's hook. True if anything changed.
     pub fn unlink(&self) -> Result<bool> {
-        let mut changed = false;
+        let mut changed = crate::clock::unhook(&self.paths)?;
         for f in self.config_files() {
             let Ok(text) = fs::read_to_string(&f) else { continue };
             let kept: Vec<&str> =
@@ -1259,6 +1267,25 @@ mod tests {
         );
         assert_eq!(s.active_name().as_deref(), Some("shd"));
         assert!(s.rerender_active().unwrap());
+    }
+
+    #[test]
+    fn the_clock_look_turns_the_palette_clock_on_and_any_other_look_or_off_turns_it_off() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        let flag = s.paths.clock_flag();
+        let (_, notes) = s.apply_noted("ps3-clock").unwrap();
+        assert!(flag.exists() && s.paths.clock_script().exists());
+        // the sandbox has no shell startup file: nothing is edited, the line to add is shown instead
+        assert!(notes.iter().any(|n| n.contains("needs zsh")), "{notes:?}");
+        let shader = s.load("ps3-clock").unwrap().resolve_asset("shaders/ps3-clock.glsl");
+        assert!(fs::read_to_string(shader).unwrap().contains("#define GP_HAS_CLOCK"));
+        s.apply("shd").unwrap();
+        assert!(!flag.exists(), "another look stops the clock");
+        s.apply("ps3-clock").unwrap();
+        s.deactivate().unwrap();
+        assert!(!flag.exists(), "off stops the clock");
     }
 
     #[test]

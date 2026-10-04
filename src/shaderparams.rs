@@ -90,6 +90,9 @@ pub struct Schema {
     /// `// @coverage full`: the effect is meant to span the screen (waves, ribbons), so it is exempt from the
     /// "does not block the screen" budget that particle effects must meet.
     pub coverage_full: bool,
+    /// The shader calls `gp_clockStamp()` (inside `#ifdef GP_HAS_CLOCK`): it tells the time from the palette clock (see
+    /// [`crate::clock`]), so in Ghostty its header defines both. No annotation, so other tools read the shader as is.
+    pub palette_clock: bool,
 }
 
 /// The name of the universal parameter that scales how strongly the effect shows (never the terminal's text).
@@ -148,7 +151,13 @@ fn label_and_rest(line: &str) -> Result<(&str, String), String> {
 /// Read the `@color` / `@float` / `@preset` annotations of a shader. Any malformed annotation is an
 /// error naming its line, so a typo is never silently ignored.
 pub fn parse_schema(src: &str) -> Result<Schema, String> {
-    let mut schema = Schema::default();
+    let mut schema = Schema {
+        // a call outside comments (the generated header's own definition is stripped first)
+        palette_clock: strip_header(src)
+            .lines()
+            .any(|l| l.split("//").next().is_some_and(|code| code.contains("gp_clockStamp("))),
+        ..Schema::default()
+    };
     type RawPreset = (usize, String, Vec<(String, String)>);
     let mut raw_presets: Vec<RawPreset> = Vec::new();
     for (i, raw) in src.lines().enumerate() {
@@ -332,6 +341,9 @@ pub struct RenderContext {
     pub background: (u8, u8, u8),
     /// The profile has a background image, so the background is a picture, not one flat color.
     pub background_image: bool,
+    /// Rendering for Ghostty itself, whose shaders have uniforms beyond Shadertoy's (`iPalette`); previews and tests
+    /// render without them, so a header only uses them when this is set.
+    pub ghostty_uniforms: bool,
 }
 
 /// Ghostty's default background (`#282c34`), for a profile that sets none.
@@ -339,7 +351,12 @@ pub const DEFAULT_BACKGROUND: (u8, u8, u8) = (0x28, 0x2c, 0x34);
 
 impl Default for RenderContext {
     fn default() -> Self {
-        RenderContext { opacity_scale: 1.0, background: DEFAULT_BACKGROUND, background_image: false }
+        RenderContext {
+            opacity_scale: 1.0,
+            background: DEFAULT_BACKGROUND,
+            background_image: false,
+            ghostty_uniforms: false,
+        }
     }
 }
 
@@ -388,6 +405,17 @@ float gp_textMask(vec2 fragCoord, vec4 term) {
 }
 ";
 
+/// The palette clock's decoder (see [`crate::clock`]): color 254 is rgb(200 + hour, 192 + minute, 192 + second) while a
+/// shell stamps it; `w` is 0 for any other value (no clock running), so the shader can say it does not know the time.
+const CLOCK_GLSL: &str = "\
+#define GP_HAS_CLOCK 1
+vec4 gp_clockStamp() {
+    vec3 t = floor(iPalette[254].rgb * 255.0 + 0.5) - vec3(200.0, 192.0, 192.0);
+    bool ok = t.x >= 0.0 && t.x < 24.0 && t.y >= 0.0 && t.y < 60.0 && t.z >= 0.0 && t.z < 60.0;
+    return vec4(t, ok ? 1.0 : 0.0);
+}
+";
+
 /// The generated header: `const` declarations built only from parsed numbers.
 pub fn header(schema: &Schema, resolved: &[String], ctx: &RenderContext) -> String {
     let mut out = format!("{BEGIN}\n");
@@ -413,6 +441,9 @@ pub fn header(schema: &Schema, resolved: &[String], ctx: &RenderContext) -> Stri
     ));
     out.push_str(&format!("const float P_bg_image = {};\n", if ctx.background_image { "1.0" } else { "0.0" }));
     out.push_str(MASK_GLSL);
+    if schema.palette_clock && ctx.ghostty_uniforms {
+        out.push_str(CLOCK_GLSL);
+    }
     if has_opacity(schema) {
         // the shader's own mainImage becomes gp_effect; the generated footer wraps it (see `render`)
         out.push_str("#define mainImage gp_effect\n");
@@ -748,7 +779,12 @@ mod tests {
 
     #[test]
     fn the_header_tells_the_shader_the_background_and_defines_the_text_mask_and_the_y_up_helper() {
-        let ctx = RenderContext { opacity_scale: 1.0, background: (0x2c, 0x2c, 0x2c), background_image: false };
+        let ctx = RenderContext {
+            opacity_scale: 1.0,
+            background: (0x2c, 0x2c, 0x2c),
+            background_image: false,
+            ghostty_uniforms: false,
+        };
         let out = render_ctx(OP, &BTreeMap::new(), &ctx).unwrap();
         assert!(
             out.contains("const vec3 P_bg = vec3(0.172549, 0.172549, 0.172549);")
