@@ -15,7 +15,7 @@
 // @float playlist 123456 1 666666 "Playlist order (digits)"
 // @float scene_period 32 3 120 "Seconds per scene"
 // @float fade 4 1 10 "Crossfade seconds"
-// @float speed 0.5 0.0 2.0 "Flight speed"
+// @float speed 1.0 0.0 3.0 "Flight speed"
 // @float pulse 0.35 0.0 1.0 "Beat strength"
 // @float tempo 72 30 180 "Tempo (BPM)"
 // @float glow 1.0 0.0 2.0 "Glow"
@@ -49,58 +49,68 @@ float vnoise(vec2 p) {
 float fbm2(vec2 p) { return vnoise(p) * 0.65 + vnoise(p * 2.07 + 11.3) * 0.35; }
 float lumOf(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
+// A soft limit on how bright a pixel may get: below the knee nothing changes, above it brightness is compressed toward `top`
+// (never flattened to one value), so bright scenes keep their contrast while light text still reads over them.
+vec3 softLimit(vec3 c, float top) {
+    float L = lumOf(c);
+    float k = 0.6 * top;
+    float L2 = L < k ? L : k + (L - k) / (1.0 + (L - k) / (top - k));
+    return c * (L2 / max(L, 1e-4));
+}
+
 // ---- 1: rolling green hills with radial motion blur -----------------------------------------------------
 float hillsH(vec2 q) {
-    float h = 5.0 * vnoise(q * vec2(0.05, 0.035)) + 1.6 * vnoise(q * 0.14 + 7.0);
+    float h = 7.5 * vnoise(q * vec2(0.032, 0.026)) + 2.4 * vnoise(q * 0.09 + 7.0) + 0.5 * vnoise(q * 0.4);
     // a round mound every so often
-    vec2 cell = vec2(floor(q.x / 46.0), floor(q.y / 70.0));
-    vec2 ctr = (cell + vec2(0.3 + 0.4 * hash21(cell), 0.3 + 0.4 * hash21(cell + 4.0))) * vec2(46.0, 70.0);
+    vec2 cell = vec2(floor(q.x / 60.0), floor(q.y / 90.0));
+    vec2 ctr = (cell + vec2(0.4 + 0.2 * hash21(cell), 0.4 + 0.2 * hash21(cell + 4.0))) * vec2(60.0, 90.0);
     float d = length((q - ctr) * vec2(1.0, 0.7));
-    h += 6.0 * hash21(cell + 9.0) * exp(-d * d / 110.0);
+    h += 9.0 * hash21(cell + 9.0) * exp(-d * d / 110.0);
     return h;
 }
 
 vec3 hills(vec2 p, float z, float t, float audio) {
-    vec2 g = vec2(1.2 * sin(t * 0.11), z);
-    // glide a couple of units above the highest ground just ahead, so the camera never dips into a hill
-    float ground = max(hillsH(g), max(hillsH(g + vec2(0.0, 5.0)), hillsH(g + vec2(0.0, 10.0))));
-    vec3 ro = vec3(g.x, ground + 2.3 + 0.2 * sin(t * 0.3), z);
-    float horizon = 0.0;
-    vec3 rd = normalize(vec3(p.x, p.y - horizon, 1.0));
-    float tt = 0.5;
+    vec2 g = vec2(1.6 * sin(t * 0.13), z);
+    // skim a metre or two above the highest ground just ahead, so the camera never dips into a hill
+    float ground = max(hillsH(g), max(hillsH(g + vec2(0.0, 3.0)), hillsH(g + vec2(0.0, 7.0))));
+    vec3 ro = vec3(g.x, ground + 1.5 + 0.25 * sin(t * 0.3), z);
+    float horizon = 0.17;                                   // the horizon sits in the upper third of the frame
+    vec3 rd = normalize(vec3(p.x * 1.45, (p.y - horizon) * 1.45, 1.0));   // a wide field of view
+    float tt = 0.4;
     bool hit = false;
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 56; i++) {
         vec3 pos = ro + rd * tt;
         float d = pos.y - hillsH(pos.xz);
         if (d < 0.004 * tt) { hit = true; break; }
-        tt += clamp(d * 0.75 + 0.03 * tt, 0.05, 9.0);
-        if (tt > 200.0 || (rd.y > 0.0 && pos.y > 13.0)) break;
+        tt += clamp(d * 0.5 + 0.015 * tt, 0.04, 9.0);
+        if (tt > 260.0 || (rd.y > 0.0 && pos.y > 20.0)) break;
     }
     vec3 skyLow = vec3(0.30, 0.64, 0.60);
-    vec3 skyHigh = vec3(0.16, 0.50, 0.55);
-    vec3 col = mix(skyLow, skyHigh, clamp((p.y - horizon) * 2.5, 0.0, 1.0));
+    vec3 skyHigh = vec3(0.14, 0.48, 0.55);
+    vec3 col = mix(skyLow, skyHigh, clamp((p.y - horizon) * 2.2, 0.0, 1.0));
     float ang = atan(p.y - horizon, p.x);
     float r = length(vec2(p.x, p.y - horizon));
-    // faint radial rays in the sky
     col *= 0.985 + 0.03 * vnoise(vec2(ang * 18.0, t * 0.05));
-    if (!hit && rd.y < 0.0) { hit = true; tt = 200.0; }
+    if (!hit && rd.y < 0.0) { hit = true; tt = 260.0; }
     if (hit) {
-        vec3 pos = ro + rd * min(tt, 200.0);
-        float e = 0.1 + tt * 0.02;
+        vec3 pos = ro + rd * min(tt, 260.0);
+        float e = 0.12 + tt * 0.02;
         vec3 n = normalize(vec3(hillsH(pos.xz - vec2(e, 0.0)) - hillsH(pos.xz + vec2(e, 0.0)), 2.0 * e,
                                 hillsH(pos.xz - vec2(0.0, e)) - hillsH(pos.xz + vec2(0.0, e))));
         float diff = clamp(0.35 + 0.8 * dot(n, normalize(vec3(-0.4, 0.8, -0.3))), 0.0, 1.0);
-        vec3 dark = vec3(0.05, 0.16, 0.05);
-        vec3 light = vec3(0.38, 0.56, 0.17);
+        vec3 dark = vec3(0.04, 0.14, 0.04);
+        vec3 light = vec3(0.40, 0.58, 0.17);
         float h = hillsH(pos.xz);
-        vec3 grass = mix(dark, light, clamp(diff * 0.85 + 0.25 * h / 3.0, 0.0, 1.0));
-        // radial streaks: the ground smears along the lines running out from the vanishing point
+        vec3 grass = mix(dark, light, clamp(diff * 0.85 + 0.2 * h / 9.0, 0.0, 1.0));
+        // near-field texture that rushes past: grass tufts and drifts at three scales
+        float tex = vnoise(pos.xz * 1.6) * 0.5 + vnoise(pos.xz * 0.5 + 3.0) * 0.35 + vnoise(pos.xz * 4.0) * 0.15;
+        float nearK = 1.0 - smoothstep(10.0, 70.0, tt);
+        grass *= 0.78 + 0.4 * mix(0.5, tex, nearK);
         float streak = vnoise(vec2(ang * 20.0, log(r + 0.05) * 0.9 + z * 0.02));
-        grass *= 0.86 + 0.20 * streak + 0.18 * (fbm2(pos.xz * 0.30) - 0.5);
-        // the dark wedge of shadow running down from the horizon
-        grass *= mix(1.0, 0.42, exp(-p.x * p.x * 7.0) * smoothstep(0.0, 0.12, horizon - p.y));
-        float fog = 1.0 - exp(-tt * 0.016);
-        col = mix(grass, skyLow * 0.98, fog * 0.92);
+        grass *= 0.9 + 0.12 * streak;
+        grass *= mix(1.0, 0.5, exp(-p.x * p.x * 6.0) * smoothstep(0.0, 0.14, horizon - p.y));
+        float fog = 1.0 - exp(-tt * 0.012);
+        col = mix(grass, skyLow * 0.98, fog * 0.88);
     }
     col *= 1.0 + 0.12 * audio;
     return col;
@@ -113,10 +123,10 @@ float valleyH(vec2 q, float rough) {
     float x = q.x - valleyC(q.y);
     // walls rise from the floor over a few units to a plateau, higher on the left than the right, so the skyline is a V that
     // runs into the vanishing point instead of a bowl
-    float wallL = 5.2 + 2.0 * vnoise(vec2(q.y * 0.05, 3.0));
-    float wallR = 3.6 + 2.0 * vnoise(vec2(q.y * 0.045, 9.0));
+    float wallL = 4.6 + 2.0 * vnoise(vec2(q.y * 0.05, 3.0));
+    float wallR = 3.4 + 2.0 * vnoise(vec2(q.y * 0.045, 9.0));
     float wall = x < 0.0 ? wallL : wallR;
-    float w = smoothstep(0.3, 8.5, abs(x));
+    float w = smoothstep(0.4, 5.5, abs(x));
     float h = wall * (w * w * (1.5 - 0.5 * w));
     h += 1.2 * vnoise(q * vec2(0.11, 0.08)) * smoothstep(1.0, 8.0, abs(x));
     // a rough, crumbly crest along the top of the walls
@@ -125,8 +135,8 @@ float valleyH(vec2 q, float rough) {
 }
 
 vec3 valley(vec2 p, float z, float t, float audio) {
-    vec3 ro = vec3(valleyC(z) + 0.9 * sin(t * 0.23) + 0.5 * sin(t * 0.51), 1.2 + 0.1 * sin(t * 0.37), z);
-    vec3 rd = normalize(vec3(p.x + 0.04 * sin(t * 0.31), p.y + 0.03, 1.0));
+    vec3 ro = vec3(valleyC(z) + 0.7 * sin(t * 0.23) + 0.4 * sin(t * 0.51), 0.85 + 0.1 * sin(t * 0.37), z);
+    vec3 rd = normalize(vec3(p.x * 1.4 + 0.04 * sin(t * 0.31), (p.y - 0.10) * 1.4, 1.0));
     float tt = 0.3;
     float minClear = 1e3;
     bool hit = false;
@@ -149,7 +159,10 @@ vec3 valley(vec2 p, float z, float t, float audio) {
                                 valleyH(pos.xz - vec2(0.0, e), 0.6) - valleyH(pos.xz + vec2(0.0, e), 0.6)));
         float diff = 0.5 + 0.5 * n.y;
         float fres = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
-        vec3 lit = P_ground * (0.35 + 0.9 * diff);
+        // rock texture on the near walls and the floor rushing under the camera
+        float rock = vnoise(pos.xz * 1.3) * 0.6 + vnoise(pos.xz * 3.7 + 5.0) * 0.4;
+        vec3 lit = (P_ground * 2.2 + P_rim * 0.04) * (0.35 + 0.9 * diff) * (0.5 + 1.0 * mix(0.5, rock, 1.0 - smoothstep(6.0, 40.0, tt)));
+        lit += P_rim * 0.10 * pow(rock, 2.0) * (1.0 - smoothstep(4.0, 30.0, tt)) * smoothstep(0.3, 2.5, pos.y);
         float high = smoothstep(2.2, 5.0, pos.y);
         float farGlow = high * smoothstep(8.0, 36.0, tt);
         float wallH = smoothstep(1.2, 3.8, pos.y);
@@ -159,7 +172,7 @@ vec3 valley(vec2 p, float z, float t, float audio) {
     }
     // a ray that skims the far floor without landing is the dark road running to the vanishing point, not sky
     if (!hit && rd.y < 0.0) {
-        col = P_ground * 1.4;
+        col = P_ground * 3.0 + P_rim * 0.04;
         hit = true;
     }
     float halo = exp(-max(minClear, 0.0) * 45.0) * (hit ? 0.0 : 1.0);
@@ -167,48 +180,50 @@ vec3 valley(vec2 p, float z, float t, float audio) {
     return col;
 }
 
-// ---- 3: calm water seen from just above the surface -------------------------------------------------------
-float waveNoise(vec2 q, float t) { return vnoise(q * 0.7 + vec2(t * 0.08, 0.0)); }
+// ---- 3: water seen from just above the surface -----------------------------------------------------------------
+float waveNoise(vec2 q, float t) { return vnoise(q * 0.55 + vec2(t * 0.1, 0.0)); }
+
+vec3 waterSky(float y, vec3 sunDir, vec3 dir) {
+    vec3 hor = vec3(0.80, 0.90, 0.95);
+    vec3 top = vec3(0.16, 0.42, 0.78);
+    vec3 c = mix(hor, top, pow(clamp(y * 1.8, 0.0, 1.0), 0.55));
+    c += vec3(1.0, 0.95, 0.80) * pow(max(dot(dir, sunDir), 0.0), 60.0) * 0.9;
+    return c;
+}
 
 vec3 water(vec2 p, float z, float t, float audio) {
-    float camY = 1.1;
-    vec3 rd = normalize(vec3(p.x + 0.02 * sin(t * 0.2), p.y + 0.13, 1.0));
-    vec3 skyHor = vec3(0.70, 0.74, 0.76);
-    vec3 skyTop = vec3(0.58, 0.65, 0.70);
-    vec3 sun = normalize(vec3(0.15, 0.32, 1.0));
-    float up = max(rd.y, 0.0);
-    vec3 sky = mix(skyHor, skyTop, pow(clamp(up * 2.2, 0.0, 1.0), 0.7));
-    if (rd.y >= -0.002) return sky * min(1.0, 0.7 * P_maxlum / max(lumOf(sky), 1e-3));
+    float camY = 0.9;
+    vec3 rd = normalize(vec3(p.x * 1.4 + 0.02 * sin(t * 0.2), (p.y - 0.17) * 1.4, 1.0));
+    vec3 sun = normalize(vec3(0.05, 0.22, 1.0));
+    if (rd.y >= -0.002) return waterSky(rd.y, sun, rd);
     float tt = camY / -rd.y;
     vec2 q = vec2(rd.x * tt, rd.z * tt + z);
-    // ripples radiating from a point ahead, travelling toward the camera
-    vec2 c0 = vec2(0.0, z + 11.0);
+    // ripple rings spreading from a point ahead, and wave trains travelling toward the camera
+    vec2 c0 = vec2(0.0, z + 9.0);
     float rr = length(q - c0);
-    float ring = sin(rr * 2.4 - t * 1.1) * exp(-rr * 0.05);
-    float att = 1.0 / (1.0 + tt * 0.06);
-    // the slope of the water: two broad swells (analytic), one noise (finite difference) and the rings
-    vec2 ph1 = vec2(0.9, 0.4) * 1.3, ph2 = vec2(-0.5, 0.85) * 2.1;
-    float c1 = cos(dot(q, ph1) + t * 0.9), c2 = cos(dot(q, ph2) - t * 0.7);
+    float ring = sin(rr * 2.8 - t * 1.6) * exp(-rr * 0.045);
+    float att = 1.0 / (1.0 + tt * 0.025);
+    vec2 ph1 = vec2(0.7, 0.55) * 1.5, ph2 = vec2(-0.6, 0.8) * 2.4, ph3 = vec2(0.1, 1.0) * 3.4;
+    float c1 = cos(dot(q, ph1) + t * 1.3), c2 = cos(dot(q, ph2) - t * 1.1), c3 = cos(dot(q, ph3) + t * 1.7);
     float e = 0.12;
     float n0 = waveNoise(q, t);
-    vec2 slope = 0.06 * c1 * ph1 + 0.04 * c2 * ph2
-               + 0.16 * vec2(waveNoise(q + vec2(e, 0.0), t) - n0, waveNoise(q + vec2(0.0, e), t) - n0) / e
-               + 0.35 * ring * (q - c0) / max(rr, 0.1) * 0.12;
+    vec2 slope = 0.30 * c1 * ph1 + 0.20 * c2 * ph2 + 0.10 * c3 * ph3
+               + 0.9 * vec2(waveNoise(q + vec2(e, 0.0), t) - n0, waveNoise(q + vec2(0.0, e), t) - n0) / e
+               + 0.55 * ring * (q - c0) / max(rr, 0.1);
     vec3 n = normalize(vec3(-slope.x * att, 1.0, -slope.y * att));
     vec3 refl = reflect(rd, n);
     refl.y = abs(refl.y);
-    vec3 rsky = mix(skyHor, skyTop, pow(clamp(refl.y * 2.2, 0.0, 1.0), 0.7));
-    rsky += vec3(1.0, 0.98, 0.92) * pow(max(dot(refl, sun), 0.0), 300.0) * (0.9 + audio);
-    float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 5.0);
-    vec3 deep = vec3(0.50, 0.52, 0.60);
-    // soft caustic streaks just under the surface
-    float caus = n0 * n0 * n0;
-    vec3 body = deep + vec3(0.10, 0.22, 0.26) * caus * att;
+    vec3 rsky = waterSky(refl.y, sun, refl);
+    float fres = 0.03 + 0.97 * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 4.0);
+    // the water itself: deep teal-blue near the camera, lighter where the light gets through the crests
+    float crest = clamp(0.5 + 3.0 * (n0 - 0.5), 0.0, 1.0);
+    vec3 body = mix(vec3(0.01, 0.16, 0.24), vec3(0.04, 0.40, 0.50), crest * att);
     vec3 col = mix(body, rsky, clamp(fres, 0.0, 1.0));
-    float fog = 1.0 - exp(-tt * 0.04);
-    col = mix(col, skyHor, fog * 0.8);
-    // the palest scene: keep it dimmer than the others so light terminal text still reads over it
-    return col * min(1.0, 0.7 * P_maxlum / max(lumOf(col), 1e-3));
+    // glints where a wave face turns toward the sun, and soft light streaks just under the surface
+    col += vec3(1.0, 0.96, 0.85) * pow(max(dot(refl, sun), 0.0), 220.0) * (3.0 + 2.0 * audio);
+    col += vec3(0.20, 0.55, 0.65) * pow(crest, 4.0) * 0.35 * att;
+    float fog = 1.0 - exp(-tt * 0.018);
+    return mix(col, vec3(0.80, 0.90, 0.95), fog * 0.75);
 }
 
 // ---- 4: dark slate with long glossy streaks -----------------------------------------------------------------
@@ -285,13 +300,13 @@ int digitAt(float pl, int k, int nd) {
 }
 
 vec3 renderScene(int id, vec2 p, float ts, float t, float audio) {
-    float z = (ts + float(id) * 37.0) * (P_speed * 2.2) + audio * 0.15;
+    float z = (ts + float(id) * 37.0) * (P_speed * 6.0) + audio * 0.6;
     if (id == 1) return hills(p, z, t, audio);
     if (id == 2) return valley(p, z, t, audio);
     if (id == 3) return water(p, z, t, audio);
     if (id == 4) return silk(p, t, audio);
     if (id == 5) return wash(p, t, audio);
-    return tunnel(p, z * 0.35, t, audio);
+    return tunnel(p, z * 0.6, t, audio);
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -327,7 +342,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             col = mix(col, renderScene(idB, p, (into - P_scene_period) + (slotF + 1.0) * 11.0, iTime, audio), w);
         }
     }
-    float L = lumOf(col);
-    col *= min(1.0, P_maxlum / max(L, 1e-3));
+    col = softLimit(col, P_maxlum);
     fragColor = vec4(mix(term.rgb, col, P_strength), term.a);
 }
