@@ -14,6 +14,22 @@ fn run(bin: &str, home: &Path, args: &[&str]) -> Output {
         .expect("binary runs")
 }
 
+fn run_stdin(bin: &str, home: &Path, args: &[&str], input: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(bin)
+        .args(args)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("binary runs");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
+}
+
 fn ok(bin: &str, home: &Path, args: &[&str]) -> String {
     let o = run(bin, home, args);
     assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
@@ -186,4 +202,80 @@ fn off_and_on_again_leave_the_users_config_alone_and_status_says_none() {
     assert!(ok(BIN, home, &["unlink"]).contains("removed the include line"));
     assert_eq!(fs::read_to_string(ghostty.join("config")).unwrap(), mine);
     assert!(ok(BIN, home, &["status"]).contains("linked          : no"));
+}
+
+#[test]
+fn delete_asks_refuses_the_active_profile_and_removes_the_whole_folder() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path();
+    ok(BIN, home, &["install-presets"]);
+    ok(BIN, home, &["new", "mine", "--from", "shd"]);
+    let dir = home.join("config/ghostty-profiles/profiles/mine");
+    fs::create_dir_all(dir.join("images")).unwrap();
+    fs::write(dir.join("images/pic.png"), "x").unwrap();
+    assert!(dir.join("shaders/xmb-waves.glsl").is_file());
+
+    // asks first: an empty answer or "n" keeps it
+    for answer in ["\n", "n\n", ""] {
+        let o = run_stdin(BIN, home, &["delete", "mine"], answer);
+        assert!(o.status.success());
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(
+            out.contains("Delete profile 'mine' and its images and shaders?") && out.contains("not deleted"),
+            "{out}"
+        );
+        assert!(dir.is_dir(), "kept after {answer:?}");
+    }
+
+    // the active profile is refused, even with --yes
+    ok(BIN, home, &["apply", "mine", "--no-reload"]);
+    let o = run(BIN, home, &["delete", "mine", "--yes"]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("active profile"));
+    assert!(dir.is_dir());
+    ok(BIN, home, &["apply", "shd", "--no-reload"]);
+
+    // y deletes everything in the folder
+    let o = run_stdin(BIN, home, &["rm", "mine"], "y\n");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("deleted 'mine'"));
+    assert!(!dir.exists(), "folder, images and shaders are gone");
+    assert!(!ok(BIN, home, &["list"]).contains("mine"));
+
+    // --yes skips the question; a missing profile is a clear error
+    let out = ok(BIN, home, &["delete", "calm-dark", "-y"]);
+    assert!(
+        out.contains("deleted 'calm-dark'") && out.contains("bundled preset") && out.contains("install-presets"),
+        "{out}"
+    );
+    let missing = run(BIN, home, &["delete", "nope", "--yes"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no profile named 'nope'"));
+    // and a bundled preset really does come back
+    assert!(ok(BIN, home, &["install-presets"]).contains("calm-dark"));
+    assert!(ok(BIN, home, &["--help"]).contains("delete"));
+}
+
+#[test]
+fn new_from_copies_images_and_shaders_too() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path();
+    ok(BIN, home, &["install-presets"]);
+    ok(BIN, home, &["new", "pic", "--from", "shd"]);
+    let src = home.join("config/ghostty-profiles/profiles/pic");
+    fs::create_dir_all(src.join("images")).unwrap();
+    fs::write(src.join("images/wall.png"), "PIXELS").unwrap();
+    let mut conf = fs::read_to_string(src.join("profile.conf")).unwrap();
+    conf.push_str("background-image = images/wall.png\nbackground-image-opacity = 0.4\n");
+    fs::write(src.join("profile.conf"), conf).unwrap();
+
+    ok(BIN, home, &["new", "pic2", "--from", "pic"]);
+    let copy = home.join("config/ghostty-profiles/profiles/pic2");
+    assert_eq!(fs::read_to_string(copy.join("images/wall.png")).unwrap(), "PIXELS", "the picture was copied");
+    assert!(copy.join("shaders/xmb-waves.glsl").is_file(), "and the shader");
+    let conf = fs::read_to_string(copy.join("profile.conf")).unwrap();
+    assert!(conf.contains("background-image = images/wall.png") && conf.contains("background-image-opacity = 0.4"));
+    // independent files: deleting the original leaves the copy's picture
+    ok(BIN, home, &["delete", "pic", "--yes"]);
+    assert!(copy.join("images/wall.png").is_file());
 }

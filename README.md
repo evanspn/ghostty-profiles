@@ -75,6 +75,13 @@ The new profile appears in the list and is selected, but it is **not applied** u
 option 1 your look lives only in the new profile, so until you apply it a Ghostty reload shows the defaults.) Then use the Edit
 tab as usual. Names are letters, digits, `.`, `_` and `-`, and must not already exist; mistakes are explained under the name box.
 
+## Deleting a profile
+
+In the TUI select a profile and press `d`, then `y` (any other key cancels). From the shell: `gpf delete NAME`
+(alias `gpf rm`; `--yes` skips the question). The whole profile folder goes, including its `images/` and
+`shaders/`. The active profile cannot be deleted: apply another one first. Bundled presets can be deleted too;
+`gpf install-presets` brings them back.
+
 ## Profiles
 
 A profile is a folder:
@@ -131,7 +138,7 @@ and your config files are backed up once as `*.bak-pre-ghostty-profiles`. Adopti
 ## Commands
 
 ```
-gpf [list | apply NAME | off | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
+gpf [list | apply NAME | off | delete NAME [--yes] | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
      | import PATH [--name N] | install-presets [--force] | reload | status | unlink]
 ```
 

@@ -46,6 +46,15 @@ fn group(key: &str) -> usize {
     }
 }
 
+/// Extra words for the delete confirmation: a bundled preset can be brought back.
+pub fn delete_note(name: &str) -> &'static str {
+    if presets::profile_names().iter().any(|p| p == name) {
+        " (a bundled preset: install-presets brings it back)"
+    } else {
+        ""
+    }
+}
+
 pub fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphanumeric())

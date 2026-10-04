@@ -204,6 +204,8 @@ fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
                 Line::from("  3  blank"),
                 Line::raw(""),
                 Line::styled("A new profile is never applied until you press Enter on it.", dim()),
+                Line::raw(""),
+                Line::from("Also on this tab: d deletes the selected profile (asks first), e exports it."),
             ];
             f.render_widget(Paragraph::new(text).block(list_block("New profile")).wrap(Wrap { trim: true }), right);
             return;

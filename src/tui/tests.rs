@@ -705,3 +705,74 @@ fn the_wizard_draws_at_small_sizes_without_panicking() {
         let _ = h.screen(w, hh);
     }
 }
+
+#[test]
+fn delete_prompt_names_the_profile_and_says_images_go_too_and_presets_come_back() {
+    let mut h = harness();
+    h.select_profile("shd");
+    h.apply("calm-dark"); // shd is not active now
+    h.select_profile("shd");
+    h.press(KeyCode::Char('d'));
+    let text = h.app.status.text.clone();
+    assert!(text.contains("'shd'") && text.contains("images and shaders"), "{text}");
+    assert!(text.contains("bundled preset") && text.contains("install-presets"), "{text}");
+    assert!(h.screen(140, 30).contains("images and shaders"), "and it is on screen");
+    h.press(KeyCode::Char('y'));
+    assert!(!h.app.profiles.contains(&"shd".to_string()));
+    assert!(!h.app.store.profiles_dir().join("shd").exists(), "the folder, shaders included, is gone");
+
+    // a user-made profile: no preset note, and its picture goes with it
+    h.select_profile("crt-green");
+    h.start_new("mine");
+    h.press(KeyCode::Char('2'));
+    let dir = h.app.store.profiles_dir().join("mine");
+    fs::create_dir_all(dir.join("images")).unwrap();
+    fs::write(dir.join("images/p.png"), "x").unwrap();
+    h.select_profile("mine");
+    h.press(KeyCode::Char('d'));
+    assert!(!h.app.status.text.contains("bundled preset"), "{}", h.app.status.text);
+    h.press(KeyCode::Char('y'));
+    assert!(!dir.exists(), "images deleted too");
+    // the New-profile help mentions delete
+    h.select_profile("aurora-glass");
+    h.press(KeyCode::Up);
+    h.press(KeyCode::Up);
+    assert!(h.screen(140, 30).contains("d deletes the selected profile"));
+}
+
+#[test]
+fn copying_a_profile_in_the_tui_copies_its_picture_and_shaders_too() {
+    let mut h = harness();
+    // give shd a background picture the way the Edit tab does
+    let img = h.td.path().join("wallpaper.png");
+    fs::write(&img, "PIXELS").unwrap();
+    h.apply("shd");
+    h.go_to_field("background-image");
+    h.press(KeyCode::Enter);
+    h.type_text(&img.display().to_string());
+    h.press(KeyCode::Enter);
+    h.go_to_field("background-image-opacity");
+    h.press(KeyCode::Enter);
+    h.type_text("0.3");
+    h.press(KeyCode::Enter);
+
+    h.select_profile("shd");
+    h.start_new("shd-copy");
+    h.press(KeyCode::Char('2'));
+    let copy = h.app.store.profiles_dir().join("shd-copy");
+    assert_eq!(fs::read_to_string(copy.join("images/wallpaper.png")).unwrap(), "PIXELS", "the picture came along");
+    assert!(copy.join("shaders/xmb-waves.glsl").is_file(), "and the shader");
+    let conf = h.conf("shd-copy");
+    assert!(
+        conf.contains("background-image = images/wallpaper.png") && conf.contains("background-image-opacity = 0.3"),
+        "{conf}"
+    );
+    assert_eq!(h.app.store.active_name().as_deref(), Some("shd"), "still not applied");
+    // the copy is independent of the original
+    h.select_profile("calm-dark");
+    h.apply("calm-dark");
+    h.select_profile("shd");
+    h.press(KeyCode::Char('d'));
+    h.press(KeyCode::Char('y'));
+    assert!(copy.join("images/wallpaper.png").is_file());
+}

@@ -468,7 +468,11 @@ impl App {
                 self.say("can't delete the active profile; apply another first", false)
             }
             Some(n) => {
-                self.say(format!("delete '{n}'? press y to confirm"), false);
+                let note = crate::store::delete_note(&n);
+                self.say(
+                    format!("delete '{n}' and its images and shaders?{note} press y to confirm, any other key cancels"),
+                    false,
+                );
                 self.confirm_delete = Some(n);
             }
             None => {}

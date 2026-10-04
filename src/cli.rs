@@ -39,6 +39,14 @@ enum Cmd {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Delete a profile and everything in its folder (images and shaders too)
+    #[command(visible_alias = "rm")]
+    Delete {
+        name: String,
+        /// Do not ask for confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Move the appearance settings of your current Ghostty config into a new profile
     Adopt { name: String },
     /// Write a portable copy of a profile (background images are left out unless --with-images)
@@ -123,6 +131,23 @@ fn run(cli: Cli) -> Result<()> {
             let p = store.new_profile(&name, from.as_deref())?;
             println!("created '{}' in {}", p.name, p.dir.display());
         }
+        Cmd::Delete { name, yes } => {
+            if !store.exists(&name) {
+                bail!("no profile named '{name}' (see `ghostty-profiles list`)");
+            }
+            if store.active_name().as_deref() == Some(name.as_str()) {
+                bail!("'{name}' is the active profile; apply another one (or `unlink`) first");
+            }
+            if !yes && !confirm(&delete_prompt(&name))? {
+                println!("not deleted");
+                return Ok(());
+            }
+            store.delete(&name)?;
+            println!("deleted '{name}'");
+            if crate::presets::profile_names().contains(&name) {
+                println!("(it is a bundled preset: `ghostty-profiles install-presets` brings it back)");
+            }
+        }
         Cmd::Adopt { name } => {
             let (p, notes) = store.adopt(&name)?;
             for n in notes {
@@ -180,6 +205,20 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The question asked before deleting; shared wording with the TUI.
+fn delete_prompt(name: &str) -> String {
+    format!("Delete profile '{name}' and its images and shaders?{} [y/N] ", crate::store::delete_note(name))
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    use std::io::{BufRead, Write};
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
 fn status(store: &Store) {
