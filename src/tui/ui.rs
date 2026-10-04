@@ -171,24 +171,31 @@ fn highlight() -> Style {
 
 fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
     let [left, right] = halves(area);
-    let items: Vec<ListItem> = app
-        .profiles
-        .iter()
-        .map(|n| {
-            let active = app.active.as_deref() == Some(n.as_str());
-            ListItem::new(Line::from(vec![
-                Span::styled(if active { "● " } else { "  " }, Style::default().fg(ACCENT)),
-                Span::raw(n.clone()),
-            ]))
-        })
-        .collect();
-    let mut st = ListState::default().with_selected((!app.profiles.is_empty()).then_some(app.sel));
+    let mark = |on: bool| Span::styled(if on { "● " } else { "  " }, Style::default().fg(ACCENT));
+    let mut items: Vec<ListItem> =
+        vec![ListItem::new(Line::from(vec![mark(app.active.is_none()), Span::styled("(none)", dim())]))];
+    items.extend(app.profiles.iter().map(|n| {
+        ListItem::new(Line::from(vec![mark(app.active.as_deref() == Some(n.as_str())), Span::raw(n.clone())]))
+    }));
+    let row = if app.none_selected { 0 } else { app.sel + 1 };
+    let mut st = ListState::default().with_selected(Some(row));
     f.render_stateful_widget(
         List::new(items).block(list_block("Profiles (● = active)")).highlight_style(highlight()),
         left,
         &mut st,
     );
 
+    if app.none_selected {
+        let on = app.active.is_none();
+        let text = vec![
+            Line::from(if on { "No profile is active." } else { "Enter turns the active profile off." }),
+            Line::raw(""),
+            Line::from("Your own Ghostty config is what applies while no profile is active."),
+            Line::styled("Pick a profile and press Enter to apply it again. u does the same from any row.", dim()),
+        ];
+        f.render_widget(Paragraph::new(text).block(list_block("(none)")).wrap(Wrap { trim: true }), right);
+        return;
+    }
     match &app.profile {
         Some(p) => {
             let mut extra = vec![Line::styled(p.description(), dim())];
@@ -323,7 +330,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let color = if app.status.ok { Color::Green } else { Color::Red };
     let help = match app.tab {
         Tab::Profiles => {
-            "↑↓ select · Enter apply · n new · d delete · e export · p presets · Tab next · ctrl+r reload · q quit"
+            "↑↓ select · Enter apply · u off (none) · n new · d delete · e export · p presets · ctrl+r reload · q quit"
         }
         Tab::Themes => "↑↓ select · / filter · Enter bake into profile · Esc clear · Tab next · q quit",
         Tab::Edit => "↑↓ select · Enter edit · ←→ cycle · x unset · Tab next · ctrl+r reload · q quit",

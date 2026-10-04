@@ -147,3 +147,43 @@ fn a_shared_profile_cannot_make_ghostty_run_anything() {
         assert!(!active.contains(bad), "{bad} reached the active Ghostty config:\n{active}");
     }
 }
+
+#[test]
+fn off_and_on_again_leave_the_users_config_alone_and_status_says_none() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path();
+    let ghostty = home.join("config/ghostty");
+    fs::create_dir_all(&ghostty).unwrap();
+    let mine = "font-size = 12\nbackground = #111111\n";
+    fs::write(ghostty.join("config"), mine).unwrap();
+    ok(BIN, home, &["install-presets"]);
+
+    ok(BIN, home, &["apply", "shd", "--no-reload"]);
+    let linked = fs::read_to_string(ghostty.join("config")).unwrap();
+    assert!(linked.starts_with(mine) && linked.contains("config-file = ?ghostty-profiles-active.conf"));
+    assert!(ok(BIN, home, &["status"]).contains("active profile  : shd"));
+
+    // off: nothing applied, include kept, main config byte-for-byte unchanged
+    assert!(ok(BIN, home, &["off", "--no-reload"]).contains("no profile is active now"));
+    let status = ok(BIN, home, &["status"]);
+    assert!(status.contains("active profile  : none"), "{status}");
+    assert!(status.contains("linked          : yes"), "{status}");
+    assert!(ok(BIN, home, &["list"]).lines().all(|l| !l.contains('●')), "no profile is marked");
+    let active = fs::read_to_string(ghostty.join("ghostty-profiles-active.conf")).unwrap();
+    assert!(active.starts_with('#') && !active.contains("palette") && !active.contains("shader"), "{active}");
+    assert_eq!(fs::read_to_string(ghostty.join("config")).unwrap(), linked);
+
+    // idempotent, and the alias works
+    assert!(ok(BIN, home, &["off", "--no-reload"]).contains("no profile was active"));
+    assert!(ok(GPF, home, &["none", "--no-reload"]).contains("no profile was active"));
+
+    // on again applies; the include is not duplicated
+    ok(BIN, home, &["apply", "calm-dark", "--no-reload"]);
+    assert!(ok(BIN, home, &["status"]).contains("active profile  : calm-dark"));
+    assert_eq!(fs::read_to_string(ghostty.join("config")).unwrap(), linked);
+
+    // unlink is the stronger step and still works
+    assert!(ok(BIN, home, &["unlink"]).contains("removed the include line"));
+    assert_eq!(fs::read_to_string(ghostty.join("config")).unwrap(), mine);
+    assert!(ok(BIN, home, &["status"]).contains("linked          : no"));
+}

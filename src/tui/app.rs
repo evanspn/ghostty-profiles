@@ -82,6 +82,8 @@ pub struct App {
 
     pub profiles: Vec<String>,
     pub sel: usize,
+    /// The cursor is on the "(none)" row above the profiles: no profile is being looked at.
+    pub none_selected: bool,
     pub profile: Option<Profile>,
     pub active: Option<String>,
 
@@ -112,6 +114,7 @@ impl App {
             confirm_delete: None,
             profiles: Vec::new(),
             sel: 0,
+            none_selected: false,
             profile: None,
             active: None,
             themes,
@@ -137,13 +140,14 @@ impl App {
     }
 
     pub fn current_name(&self) -> Option<&str> {
-        self.profiles.get(self.sel).map(String::as_str)
+        if self.none_selected { None } else { self.profiles.get(self.sel).map(String::as_str) }
     }
 
     // ---- profile list ---------------------------------------------------------
     /// Reload the list; keep `keep` selected if given, else the previous or the active one.
     pub fn refresh_profiles(&mut self, keep: Option<&str>) {
         let previous = keep.map(str::to_string).or_else(|| self.current_name().map(str::to_string));
+        self.none_selected = false;
         self.profiles = self.store.list_profiles();
         self.active = self.store.active_name();
         let want = previous.or_else(|| self.active.clone());
@@ -264,13 +268,35 @@ impl App {
 
     // ---- Profiles tab -----------------------------------------------------------
     fn profiles_key(&mut self, key: KeyEvent) {
-        let before = self.sel;
-        Self::step(&mut self.sel, self.profiles.len(), key.code);
-        if self.sel != before {
+        let before = (self.sel, self.none_selected);
+        match key.code {
+            // "(none)" is the row above the first profile
+            KeyCode::Up | KeyCode::Char('k') if !self.none_selected && self.sel == 0 => self.none_selected = true,
+            KeyCode::Home => self.none_selected = true,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown | KeyCode::End if self.none_selected => {
+                self.none_selected = false;
+                self.sel = if key.code == KeyCode::End { self.profiles.len().saturating_sub(1) } else { 0 };
+            }
+            KeyCode::Up
+            | KeyCode::Char('k')
+            | KeyCode::PageUp
+            | KeyCode::Down
+            | KeyCode::Char('j')
+            | KeyCode::PageDown
+            | KeyCode::End
+                if !self.none_selected =>
+            {
+                Self::step(&mut self.sel, self.profiles.len(), key.code)
+            }
+            _ => {}
+        }
+        if (self.sel, self.none_selected) != before {
             self.load_selected();
         }
         match key.code {
+            KeyCode::Enter if self.none_selected => self.deactivate(),
             KeyCode::Enter => self.apply_selected(),
+            KeyCode::Char('u') => self.deactivate(),
             KeyCode::Char('p') => match self.store.install_presets(false) {
                 Ok(v) if v.is_empty() => self.say("all preset profiles are already installed", true),
                 Ok(v) => {
@@ -280,6 +306,23 @@ impl App {
                 Err(e) => self.say(format!("{e:#}"), false),
             },
             _ => {}
+        }
+    }
+
+    /// Turn the active look off so the user's own Ghostty config shows through.
+    pub fn deactivate(&mut self) {
+        match self.store.deactivate() {
+            Ok(was_active) => {
+                self.active = None;
+                self.reload_due = Some(Instant::now() + self.debounce);
+                let text = if was_active {
+                    "no profile active: your own Ghostty config is in effect, reloading Ghostty"
+                } else {
+                    "no profile was active"
+                };
+                self.say(text, true);
+            }
+            Err(e) => self.say(format!("could not turn the profile off: {e:#}"), false),
         }
     }
 
@@ -380,7 +423,7 @@ impl App {
     pub fn bake_theme(&mut self) {
         let Some(theme) = self.selected_theme().cloned() else { return };
         let Some(p) = self.profile.as_mut() else {
-            self.say("no profile selected", false);
+            self.say("no profile selected: move off \"(none)\" on the Profiles tab to edit one", false);
             return;
         };
         let c = ghostty::theme_colors(&theme.text);
@@ -464,7 +507,7 @@ impl App {
             }
         };
         let Some(p) = self.profile.as_mut() else {
-            self.say("no profile selected", false);
+            self.say("no profile selected: move off \"(none)\" on the Profiles tab to edit one", false);
             return false;
         };
         let value = if field.kind == Kind::Image { value.map(|v| import_image(p, &v)).transpose() } else { Ok(value) };
@@ -515,7 +558,7 @@ impl App {
     pub fn toggle_shader(&mut self) {
         let Some(row) = self.shader_rows.get(self.shader_sel).cloned() else { return };
         let Some(p) = self.profile.as_mut() else {
-            self.say("no profile selected", false);
+            self.say("no profile selected: move off \"(none)\" on the Profiles tab to edit one", false);
             return;
         };
         let rel = format!("shaders/{}", row.name);

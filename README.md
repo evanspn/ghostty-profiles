@@ -23,6 +23,7 @@ the 463 built-in Ghostty themes and the presets are compiled into the binary.
 gpf                      # open the TUI (installs the presets on first run)
 gpf list                 # list profiles, ● marks the active one
 gpf apply shd            # make a profile the active look and reload Ghostty
+gpf off                  # no profile: your own Ghostty config shows through again
 gpf adopt mine           # turn your current Ghostty look into a profile
 ```
 
@@ -32,18 +33,27 @@ The first `apply` adds **one** line to your Ghostty config (a backup is kept):
 config-file = ?ghostty-profiles-active.conf
 ```
 
-Everything else lives in `~/.config/ghostty-profiles/`. `gpf unlink` removes that line again.
+Everything else lives in `~/.config/ghostty-profiles/`.
+
+### Turning a profile off
+
+Want your own config back for a while? Pick **`(none)`** (the first row of the Profiles tab, or press `u`), or run `gpf off`.
+The generated file is emptied (so nothing from any profile applies), the include line stays, and Ghostty is reloaded so your own
+settings show immediately. Applying a profile again turns it back on. `(none)` is marked ● while no profile is active, and
+`gpf status` says `active profile  : none`. Your main Ghostty config is never touched by `off`.
+
+`gpf unlink` is the stronger step: it removes the include line itself. Use `off` day to day and `unlink` to uninstall.
 
 ## The TUI
 
 | Tab | What it does |
 | --- | --- |
-| **Profiles** | Your profiles with a live preview. `Enter` applies one. |
+| **Profiles** | `(none)` plus your profiles, with a live preview. `Enter` applies one (on `(none)`: turns the look off). |
 | **Themes** | All themes with a filter (`/`) and color swatches. `Enter` bakes the theme's colors into the current profile. |
 | **Edit** | Colors (including the 16 ANSI colors, hex-validated, with swatches), font family/size/thickness/features, cell adjustments, cursor, opacity/blur/padding, background image path/opacity/fit/position. |
 | **Shaders** | The bundled shader library plus the profile's own. `Enter` toggles, `a` toggles animation. |
 
-Keys: `Tab`/`Shift-Tab` or `1`-`4` switch tabs, `↑↓` move, `n` new profile (a copy of the selected
+Keys: `Tab`/`Shift-Tab` or `1`-`4` switch tabs, `↑↓` move, `u` off (no profile), `n` new profile (a copy of the selected
 one), `d` delete (asks for `y`), `e` export, `p` install presets, `ctrl+r` force reload, `q` quit.
 In Edit: `Enter` edits (or cycles a choice), `←→` cycle choices, `x` unsets the value.
 
@@ -107,7 +117,7 @@ and your config files are backed up once as `*.bak-pre-ghostty-profiles`. Adopti
 ## Commands
 
 ```
-gpf [list | apply NAME | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
+gpf [list | apply NAME | off | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
      | import PATH [--name N] | install-presets [--force] | reload | status | unlink]
 ```
 

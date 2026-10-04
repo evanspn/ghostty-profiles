@@ -69,7 +69,14 @@ enum Cmd {
     /// Show where things are and whether the setup is healthy
     #[command(visible_alias = "doctor")]
     Status,
-    /// Remove the include line this tool added to your Ghostty config
+    /// Turn the active look off: Ghostty keeps your own config only (the include stays, nothing is applied)
+    #[command(visible_alias = "none")]
+    Off {
+        /// Write the config but do not signal Ghostty
+        #[arg(long)]
+        no_reload: bool,
+    },
+    /// Remove the include line this tool added to your Ghostty config (stronger than `off`)
     Unlink,
 }
 
@@ -154,6 +161,16 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Status => status(&store),
+        Cmd::Off { no_reload } => {
+            if store.deactivate()? {
+                println!("no profile is active now; your own Ghostty config is in effect (the include line stays)");
+            } else {
+                println!("no profile was active");
+            }
+            if !no_reload {
+                println!("{}", SignalReloader.reload().detail);
+            }
+        }
         Cmd::Unlink => {
             if store.unlink()? {
                 println!("removed the include line; your active look is no longer loaded");

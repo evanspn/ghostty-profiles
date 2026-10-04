@@ -59,6 +59,9 @@ impl Harness {
     fn select_profile(&mut self, name: &str) {
         let i = self.app.profiles.iter().position(|p| p == name).unwrap();
         self.app.tab = Tab::Profiles;
+        if self.app.none_selected {
+            self.press(KeyCode::Down);
+        }
         while self.app.sel < i {
             self.press(KeyCode::Down);
         }
@@ -404,4 +407,93 @@ fn quit_keys() {
     h.press(KeyCode::Char('n'));
     h.type_text("quiet");
     assert!(!h.app.quit);
+}
+
+#[test]
+fn none_row_is_always_there_and_marks_the_active_state() {
+    let mut h = harness();
+    let screen = h.screen(110, 30);
+    assert!(screen.contains("● (none)"), "nothing applied yet, so (none) is the marked row:\n{screen}");
+    h.apply("shd");
+    let screen = h.screen(110, 30);
+    assert!(screen.contains("● shd") && !screen.contains("● (none)"), "{screen}");
+    assert!(screen.contains("u off"), "the key is on the footer");
+    // the (none) row is reachable with Up from the first profile, and Down comes back
+    h.select_profile("aurora-glass");
+    h.press(KeyCode::Up);
+    assert!(h.app.none_selected && h.app.current_name().is_none());
+    assert!(h.screen(110, 30).contains("Enter turns the active profile off"));
+    h.press(KeyCode::Down);
+    assert!(!h.app.none_selected && h.app.current_name() == Some("aurora-glass"));
+}
+
+#[test]
+fn enter_on_none_and_the_u_key_turn_the_profile_off_and_back_on() {
+    let mut h = harness();
+    h.apply("shd");
+    let reloads = h.reloads.get();
+    h.select_profile("aurora-glass");
+    h.press(KeyCode::Up); // onto (none)
+    h.press(KeyCode::Enter);
+    assert_eq!(h.app.active, None);
+    assert_eq!(h.app.store.active_name(), None);
+    assert_eq!(h.active_conf(), crate::store::OFF_CONF, "the generated file applies nothing");
+    assert!(h.app.store.is_linked(), "the include stays");
+    assert!(h.app.reload_pending());
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 1, "Ghostty is reloaded so the user's own config shows through");
+    let screen = h.screen(110, 30);
+    assert!(screen.contains("● (none)") && screen.contains("No profile is active"), "{screen}");
+
+    // off again is harmless and idempotent
+    h.press(KeyCode::Enter);
+    assert_eq!(h.active_conf(), crate::store::OFF_CONF);
+    assert!(h.app.status.text.contains("no profile was active"));
+
+    // re-selecting a profile applies it again
+    h.apply("calm-dark");
+    assert_eq!(h.app.active.as_deref(), Some("calm-dark"));
+    assert!(h.active_conf().contains("background = #1b1e24"));
+
+    // u works from any row
+    h.press(KeyCode::Char('u'));
+    assert_eq!(h.app.active, None);
+    assert_eq!(h.active_conf(), crate::store::OFF_CONF);
+}
+
+#[test]
+fn edits_while_none_is_selected_change_nothing_and_say_why() {
+    let mut h = harness();
+    h.apply("shd");
+    h.press(KeyCode::Char('u'));
+    h.tick();
+    let shd_before = h.conf("shd");
+    let reloads = h.reloads.get();
+
+    h.select_profile("aurora-glass");
+    h.press(KeyCode::Up);
+    assert!(h.app.none_selected);
+    h.go_to_field("background");
+    h.press(KeyCode::Enter);
+    h.type_text("#123456");
+    h.press(KeyCode::Enter);
+    assert!(h.app.status.text.contains("no profile selected"), "{}", h.app.status.text);
+    assert_eq!(h.conf("shd"), shd_before, "no profile was edited");
+    assert_eq!(h.active_conf(), crate::store::OFF_CONF, "and nothing was silently re-activated");
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads);
+    assert_eq!(h.app.store.active_name(), None);
+    assert!(h.app.input.is_some(), "the box stays open so nothing typed is lost");
+    h.press(KeyCode::Esc);
+    assert!(h.screen(100, 24).contains("Select a profile"));
+
+    // editing a selected-but-inactive profile saves it without applying it, and says so
+    h.select_profile("shd");
+    h.go_to_field("font-size");
+    h.press(KeyCode::Enter);
+    h.type_text("15");
+    h.press(KeyCode::Enter);
+    assert!(h.conf("shd").contains("font-size = 15"));
+    assert_eq!(h.active_conf(), crate::store::OFF_CONF);
+    assert!(h.app.status.text.contains("not the active profile"));
 }
