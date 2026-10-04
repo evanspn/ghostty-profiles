@@ -187,8 +187,11 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Apply { name, no_reload } => {
-            let conf = store.apply(&name)?;
+            let (conf, notes) = store.apply_noted(&name)?;
             println!("applied '{name}' ({})", conf.display());
+            for n in &notes {
+                println!("note: {n}");
+            }
             let ignored = store.load(&name)?.ignored_keys();
             if !ignored.is_empty() {
                 println!("note: not applied (not appearance settings): {}", ignored.join(", "));

@@ -377,6 +377,34 @@ impl Profile {
     /// Untouched copies of shaders from older releases are first upgraded to the current library
     /// version. Files are only rewritten when their content changes. Returns notes about shaders
     /// whose annotations are malformed (those are left alone).
+    /// Drop a `custom-shader` line whose file is not in the profile and is no longer a bundled shader (one that was removed from
+    /// the library): applying must not hand Ghostty a path that does not exist. Returns a note per dropped shader. Nothing is
+    /// written; call `save` if anything was dropped. A shader file that IS in the profile folder is the user's now and stays.
+    pub fn drop_missing_shaders(&mut self) -> Vec<String> {
+        let mut notes = Vec::new();
+        let missing: Vec<String> = self
+            .shaders()
+            .into_iter()
+            .filter(|rel| {
+                let file_name = Self::shader_file_name(rel);
+                !self.dir.join(unquote(rel)).exists() && crate::presets::shader_source(&file_name).is_none()
+            })
+            .collect();
+        if missing.is_empty() {
+            return notes;
+        }
+        let keep: Vec<String> = self.shaders().into_iter().filter(|rel| !missing.contains(rel)).collect();
+        for rel in &missing {
+            notes.push(format!(
+                "shader '{}' is no longer available, so '{}' now has no shader for it",
+                Self::shader_file_name(rel),
+                self.name
+            ));
+        }
+        self.set_shaders(&keep);
+        notes
+    }
+
     pub fn render_shaders(&self) -> Result<Vec<String>> {
         let mut notes = Vec::new();
         for rel in self.shaders() {

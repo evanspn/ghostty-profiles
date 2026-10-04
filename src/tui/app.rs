@@ -483,11 +483,15 @@ impl App {
 
     pub fn apply_selected(&mut self) {
         let Some(name) = self.current_name().map(str::to_string) else { return };
-        match self.store.apply(&name) {
-            Ok(_) => {
+        match self.store.apply_noted(&name) {
+            Ok((_, notes)) => {
                 self.active = Some(name.clone());
                 self.reload_due = Some(Instant::now() + self.debounce);
-                self.say(format!("applied '{name}', reloading Ghostty"), true);
+                let extra = notes.first().map(|n| format!(" ({n})")).unwrap_or_default();
+                self.say(format!("applied '{name}', reloading Ghostty{extra}"), true);
+                if !notes.is_empty() {
+                    self.rebuild_shader_rows();
+                }
             }
             Err(e) => self.say(format!("could not apply: {e:#}"), false),
         }

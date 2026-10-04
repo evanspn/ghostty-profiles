@@ -291,15 +291,25 @@ impl Store {
     }
 
     pub fn apply(&self, name: &str) -> Result<PathBuf> {
+        self.apply_noted(name).map(|(conf, _)| conf)
+    }
+
+    /// Like [`apply`](Self::apply), also returning notes to show the user (for example a shader that no longer exists).
+    pub fn apply_noted(&self, name: &str) -> Result<(PathBuf, Vec<String>)> {
         // a profile keeps one shader: tidy it up as it is applied (backed up first, user-written files kept)
         self.prune_profile(name, false, false)?;
-        let prof = self.load(name)?;
+        let mut prof = self.load(name)?;
+        // a profile pointing at a shader that was removed from the library falls back to none instead of a dead path
+        let notes = prof.drop_missing_shaders();
+        if !notes.is_empty() {
+            prof.save()?;
+        }
         prof.render_shaders()?;
         let conf = self.paths.active_conf();
         atomic_write(&conf, &prof.render())?;
         atomic_write(&self.paths.active_file(), name)?;
         self.ensure_linked()?;
-        Ok(conf)
+        Ok((conf, notes))
     }
 
     /// Turn the active look off: keep the include line, but make the generated file apply nothing, so
@@ -323,7 +333,10 @@ impl Store {
     pub fn rerender_active(&self) -> Result<bool> {
         match self.active_name() {
             Some(n) => {
-                let prof = self.load(&n)?;
+                let mut prof = self.load(&n)?;
+                if !prof.drop_missing_shaders().is_empty() {
+                    prof.save()?;
+                }
                 prof.render_shaders()?;
                 atomic_write(&self.paths.active_conf(), &prof.render())?;
                 Ok(true)
@@ -1417,5 +1430,52 @@ mod tests {
         assert!(!dest.join("images").exists());
         assert_eq!(s.import_profile(&dest, Some("shd2")).unwrap(), ("shd2".to_string(), vec![]));
         assert_eq!(s.load("shd2").unwrap().shaders(), vec!["shaders/xmb-waves.glsl"]);
+    }
+}
+
+#[cfg(test)]
+mod removed_shader_tests {
+    use super::*;
+    use crate::paths::Paths;
+
+    #[test]
+    fn a_profile_pointing_at_a_shader_that_no_longer_exists_applies_with_no_shader_and_a_note() {
+        let td = tempfile::tempdir().unwrap();
+        let s = Store::new(Paths::new(td.path().join("config")));
+        s.install_presets(false).unwrap();
+        s.new_profile("old", None).unwrap();
+        let dir = s.profiles_dir().join("old");
+        // a profile from an earlier release: it names a shader that is neither in its folder nor in the library any more
+        let conf = fs::read_to_string(dir.join("profile.conf")).unwrap();
+        fs::write(
+            dir.join("profile.conf"),
+            format!("{conf}\ncustom-shader = shaders/ps3-visualizer.glsl\ncustom-shader-animation = true\n"),
+        )
+        .unwrap();
+        assert!(crate::presets::shader_source("ps3-visualizer.glsl").is_none(), "the shader is gone from the library");
+        let (active, notes) = s.apply_noted("old").unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("ps3-visualizer.glsl") && notes[0].contains("no longer available"), "{notes:?}");
+        let rendered = fs::read_to_string(active).unwrap();
+        assert!(!rendered.contains("ps3-visualizer"), "no dead shader path reaches Ghostty:\n{rendered}");
+        assert!(!rendered.contains("custom-shader"), "{rendered}");
+        let saved = fs::read_to_string(dir.join("profile.conf")).unwrap();
+        assert!(!saved.contains("ps3-visualizer"), "the profile itself is fixed too:\n{saved}");
+        // idempotent: nothing more to say next time
+        assert!(s.apply_noted("old").unwrap().1.is_empty());
+        // a shader file the user still has in the profile folder is theirs and keeps working
+        s.new_profile("kept", None).unwrap();
+        let kdir = s.profiles_dir().join("kept");
+        fs::create_dir_all(kdir.join("shaders")).unwrap();
+        fs::write(
+            kdir.join("shaders/ps3-visualizer.glsl"),
+            "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }\n",
+        )
+        .unwrap();
+        let conf = fs::read_to_string(kdir.join("profile.conf")).unwrap();
+        fs::write(kdir.join("profile.conf"), format!("{conf}\ncustom-shader = shaders/ps3-visualizer.glsl\n")).unwrap();
+        let (_, notes) = s.apply_noted("kept").unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(fs::read_to_string(s.paths.active_conf()).unwrap().contains("ps3-visualizer.glsl"));
     }
 }
