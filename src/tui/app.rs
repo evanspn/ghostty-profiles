@@ -42,6 +42,8 @@ impl Tab {
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputKind {
     Field(usize),
+    /// Renaming the named profile.
+    Rename(String),
     NewProfile,
     Export,
     Filter,
@@ -272,6 +274,7 @@ impl App {
             KeyCode::Char('3') => self.tab = Tab::Edit,
             KeyCode::Char('4') => self.tab = Tab::Shaders,
             KeyCode::Char('n') => self.begin_new(),
+            KeyCode::Char('r') => self.begin_rename(),
             KeyCode::Char('d') => self.begin_delete(),
             KeyCode::Char('e') => self.begin_export(),
             _ => match self.tab {
@@ -459,6 +462,19 @@ impl App {
                 self.say(format!("created '{name}' from {from}. Not applied yet: press Enter on it to apply"), true);
             }
             Err(e) => self.say(format!("could not create '{name}': {e:#}"), false),
+        }
+    }
+
+    fn begin_rename(&mut self) {
+        if let Some(n) = self.current_name().map(str::to_string) {
+            self.input = Some(Input {
+                kind: InputKind::Rename(n.clone()),
+                title: format!("Rename '{n}' (Enter confirms, Esc cancels)"),
+                buf: n,
+                error: None,
+            });
+        } else {
+            self.say("select a profile to rename", false);
         }
     }
 
@@ -792,6 +808,34 @@ impl App {
                 }
                 let copy_from = self.current_name().map(str::to_string);
                 self.wizard = Some(Wizard { name, step: WizardStep::Base(0), copy_from });
+            }
+            InputKind::Rename(ref old) => {
+                let new = input.buf.trim().to_string();
+                if new == *old {
+                    self.say("name unchanged", true);
+                    return;
+                }
+                match self.store.rename(old, &new) {
+                    Ok(was_active) => {
+                        let preset = if crate::presets::profile_names().contains(old) {
+                            format!(" ('{old}' is a bundled preset: install-presets will bring the original back)")
+                        } else {
+                            String::new()
+                        };
+                        self.refresh_profiles(Some(&new));
+                        if was_active {
+                            self.reload_due = Some(Instant::now() + self.debounce);
+                            self.say(format!("renamed '{old}' to '{new}', reloading Ghostty{preset}"), true);
+                        } else {
+                            self.say(format!("renamed '{old}' to '{new}'{preset}"), true);
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        self.say(msg.clone(), false);
+                        self.input = Some(Input { error: Some(msg), ..input });
+                    }
+                }
             }
             InputKind::Export => {
                 let Some(p) = self.profile.clone() else { return };

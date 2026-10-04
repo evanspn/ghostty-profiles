@@ -39,6 +39,14 @@ enum Cmd {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Rename a profile (its images and shaders move with it; the active profile stays active)
+    Rename {
+        old: String,
+        new: String,
+        /// Do not signal Ghostty (when the renamed profile is the active one)
+        #[arg(long)]
+        no_reload: bool,
+    },
     /// Delete a profile and everything in its folder (images and shaders too)
     #[command(visible_alias = "rm")]
     Delete {
@@ -130,6 +138,21 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::New { name, from } => {
             let p = store.new_profile(&name, from.as_deref())?;
             println!("created '{}' in {}", p.name, p.dir.display());
+        }
+        Cmd::Rename { old, new, no_reload } => {
+            let was_active = store.rename(&old, &new)?;
+            println!("renamed '{old}' to '{new}'");
+            if crate::presets::profile_names().contains(&old) {
+                println!(
+                    "note: '{old}' is a bundled preset; `ghostty-profiles install-presets` will install the original again"
+                );
+            }
+            if was_active {
+                println!("it is the active profile: the generated config now points at the new folder");
+                if !no_reload {
+                    println!("{}", SignalReloader.reload().detail);
+                }
+            }
         }
         Cmd::Delete { name, yes } => {
             if !store.exists(&name) {

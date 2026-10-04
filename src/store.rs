@@ -169,6 +169,49 @@ impl Store {
         Ok(prof)
     }
 
+    /// Rename a profile: the whole folder moves, so `images/` and `shaders/` keep their relative paths and
+    /// nothing inside needs rewriting. If it is the active profile, the recorded active name and the
+    /// generated config (whose asset paths are absolute) are updated, so Ghostty is never left pointing
+    /// at a folder that no longer exists. Returns whether the renamed profile is the active one (the
+    /// caller should reload Ghostty then).
+    pub fn rename(&self, old: &str, new: &str) -> Result<bool> {
+        if !self.exists(old) {
+            bail!("no profile named '{old}' (see `ghostty-profiles list`)");
+        }
+        if new.is_empty() {
+            bail!("type a name for the profile");
+        }
+        if !valid_name(new) {
+            bail!("name must be letters, digits, '.', '_' or '-' (no spaces or slashes)");
+        }
+        if new == old {
+            bail!("'{old}' already has that name");
+        }
+        let existing = self.list_profiles();
+        if existing.iter().any(|n| n == new) {
+            bail!("a profile named '{new}' already exists: pick another name");
+        }
+        let (from, to) = (self.profiles_dir().join(old), self.profiles_dir().join(new));
+        if old.eq_ignore_ascii_case(new) {
+            // only the case differs: on a case-insensitive filesystem both names are the same folder,
+            // so go through a temporary name
+            let mut tmp = from.as_os_str().to_owned();
+            tmp.push(".renaming");
+            let tmp = PathBuf::from(tmp);
+            fs::rename(&from, &tmp)?;
+            fs::rename(&tmp, &to)?;
+        } else {
+            fs::rename(&from, &to)?;
+        }
+        let was_active = self.active_name().as_deref() == Some(old)
+            || fs::read_to_string(self.paths.active_file()).is_ok_and(|n| n.trim() == old);
+        if was_active {
+            atomic_write(&self.paths.active_file(), new)?;
+            self.rerender_active()?;
+        }
+        Ok(was_active)
+    }
+
     pub fn delete(&self, name: &str) -> Result<()> {
         if !self.exists(name) {
             bail!("no profile named '{name}'");
@@ -544,6 +587,109 @@ mod tests {
         assert_eq!(fs::read_to_string(s.paths.active_conf()).unwrap(), OFF_CONF);
         // unlink is the stronger step: it removes the include
         assert!(s.unlink().unwrap() && !s.is_linked());
+    }
+
+    #[test]
+    fn rename_moves_the_whole_folder_and_keeps_images_and_shaders() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.new_profile("mine", Some("shd")).unwrap();
+        let old = s.profiles_dir().join("mine");
+        fs::create_dir_all(old.join("images")).unwrap();
+        fs::write(old.join("images/wall.png"), "PIXELS").unwrap();
+        let mut p = s.load("mine").unwrap();
+        p.set("background-image", "images/wall.png");
+        p.save().unwrap();
+        s.apply("calm-dark").unwrap();
+        let active_before = fs::read_to_string(s.paths.active_conf()).unwrap();
+
+        assert!(!s.rename("mine", "better").unwrap(), "not the active profile");
+        let new = s.profiles_dir().join("better");
+        assert!(!old.exists() && new.is_dir());
+        assert_eq!(fs::read_to_string(new.join("images/wall.png")).unwrap(), "PIXELS");
+        assert!(new.join("shaders/xmb-waves.glsl").is_file());
+        let conf = fs::read_to_string(new.join(CONF_NAME)).unwrap();
+        assert!(
+            conf.contains("background-image = images/wall.png")
+                && conf.contains("custom-shader = shaders/xmb-waves.glsl"),
+            "relative paths untouched: {conf}"
+        );
+        assert!(s.exists("better") && !s.exists("mine"));
+        assert_eq!(s.active_name().as_deref(), Some("calm-dark"));
+        assert_eq!(fs::read_to_string(s.paths.active_conf()).unwrap(), active_before, "the live look is untouched");
+    }
+
+    #[test]
+    fn renaming_the_active_profile_keeps_ghostty_pointing_at_a_real_folder() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.apply("shd").unwrap();
+        let before = fs::read_to_string(s.paths.active_conf()).unwrap();
+        assert!(before.contains(&s.profiles_dir().join("shd/shaders/xmb-waves.glsl").display().to_string()));
+        let linked = fs::read_to_string(s.paths.ghostty_dir().join("config.ghostty")).unwrap();
+
+        assert!(s.rename("shd", "ember").unwrap(), "reports that it was active");
+        assert_eq!(s.active_name().as_deref(), Some("ember"), "the marker moved with it");
+        let after = fs::read_to_string(s.paths.active_conf()).unwrap();
+        let shader = s.profiles_dir().join("ember/shaders/xmb-waves.glsl");
+        assert!(after.contains(&format!("custom-shader = {}", shader.display())), "{after}");
+        assert!(shader.is_file(), "the path Ghostty will read exists");
+        assert!(!after.contains(&s.profiles_dir().join("shd").display().to_string()), "no stale path: {after}");
+        assert!(after.contains("from profile 'ember'"));
+        assert_eq!(
+            fs::read_to_string(s.paths.ghostty_dir().join("config.ghostty")).unwrap(),
+            linked,
+            "the include is untouched"
+        );
+    }
+
+    #[test]
+    fn rename_refuses_bad_names_collisions_and_missing_profiles_and_changes_nothing() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.apply("shd").unwrap();
+        let (list, active) = (s.list_profiles(), fs::read_to_string(s.paths.active_conf()).unwrap());
+        for (old, new, expect) in [
+            ("calm-dark", "", "type a name"),
+            ("calm-dark", "a/b", "letters, digits"),
+            ("calm-dark", "has space", "letters, digits"),
+            ("calm-dark", ".hidden", "letters, digits"),
+            ("calm-dark", "../escape", "letters, digits"),
+            ("calm-dark", "shd", "already exists"),
+            ("calm-dark", "calm-dark", "already has that name"),
+            ("nope", "x", "no profile named"),
+            ("../x", "y", "no profile named"),
+        ] {
+            let e = s.rename(old, new).unwrap_err().to_string();
+            assert!(e.contains(expect), "{old} -> {new:?}: {e}");
+        }
+        assert_eq!(s.list_profiles(), list, "nothing moved");
+        assert_eq!(fs::read_to_string(s.paths.active_conf()).unwrap(), active);
+        assert_eq!(s.active_name().as_deref(), Some("shd"));
+    }
+
+    #[test]
+    fn a_case_only_rename_works_even_on_a_case_insensitive_filesystem() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.new_profile("mine", None).unwrap();
+        s.rename("mine", "Mine").unwrap();
+        assert!(s.list_profiles().contains(&"Mine".to_string()));
+        assert!(!s.list_profiles().contains(&"mine".to_string()));
+    }
+
+    #[test]
+    fn a_renamed_preset_can_be_reinstalled_alongside_it() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.rename("calm-dark", "my-calm").unwrap();
+        assert_eq!(s.install_presets(false).unwrap(), vec!["calm-dark"], "the original comes back");
+        assert!(s.exists("my-calm") && s.exists("calm-dark"));
     }
 
     #[test]

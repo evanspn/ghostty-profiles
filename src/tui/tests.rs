@@ -530,7 +530,7 @@ fn a_new_profile_row_is_first_in_the_list_and_the_footer_names_the_keys() {
     let none_row = screen.lines().position(|l| l.contains("(none)")).unwrap();
     let first_profile = screen.lines().position(|l| l.contains("│  aurora-glass")).unwrap();
     assert!(new_row < none_row && none_row < first_profile, "it is the first row:\n{screen}");
-    for hint in ["n new profile", "d delete", "e export", "u off", "Enter apply"] {
+    for hint in ["n new profile", "r rename", "d delete", "e export", "u off", "Enter apply"] {
         assert!(screen.contains(hint), "footer is missing '{hint}':\n{screen}");
     }
     // Up from the first profile reaches (none), then + New profile
@@ -737,7 +737,7 @@ fn delete_prompt_names_the_profile_and_says_images_go_too_and_presets_come_back(
     h.select_profile("aurora-glass");
     h.press(KeyCode::Up);
     h.press(KeyCode::Up);
-    assert!(h.screen(140, 30).contains("d deletes the selected profile"));
+    assert!(h.screen(140, 30).contains("r renames, d deletes"));
 }
 
 #[test]
@@ -775,4 +775,120 @@ fn copying_a_profile_in_the_tui_copies_its_picture_and_shaders_too() {
     h.press(KeyCode::Char('d'));
     h.press(KeyCode::Char('y'));
     assert!(copy.join("images/wallpaper.png").is_file());
+}
+
+// ---- renaming ---------------------------------------------------------------------
+
+#[test]
+fn r_renames_the_selected_profile_and_keeps_it_selected() {
+    let mut h = harness();
+    h.select_profile("crt-green");
+    assert!(h.screen(140, 30).contains("r rename"), "the footer lists the key");
+    h.press(KeyCode::Char('r'));
+    let input = h.app.input.as_ref().unwrap();
+    assert_eq!(input.buf, "crt-green", "pre-filled with the current name");
+    assert!(h.screen(140, 30).contains("Rename 'crt-green'"));
+    for _ in 0..9 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("my-crt");
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.is_none());
+    assert!(h.app.profiles.contains(&"my-crt".to_string()) && !h.app.profiles.contains(&"crt-green".to_string()));
+    assert_eq!(h.app.current_name(), Some("my-crt"), "the renamed profile stays selected");
+    assert!(h.app.status.text.contains("renamed 'crt-green' to 'my-crt'"));
+    assert!(h.screen(140, 30).contains("my-crt"));
+    assert!(h.conf("my-crt").contains("background = #040a05"));
+    assert!(!h.app.store.paths.active_conf().exists(), "renaming an inactive profile applies nothing");
+}
+
+#[test]
+fn renaming_the_active_profile_keeps_the_marker_rerenders_and_reloads() {
+    let mut h = harness();
+    h.apply("shd");
+    let reloads = h.reloads.get();
+    h.press(KeyCode::Char('r'));
+    for _ in 0..3 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("ember");
+    h.press(KeyCode::Enter);
+    assert_eq!(h.app.active.as_deref(), Some("ember"));
+    assert_eq!(h.app.store.active_name().as_deref(), Some("ember"));
+    let screen = h.screen(140, 30);
+    assert!(screen.contains("● ember") && !screen.contains("● shd"), "the marker is on the renamed profile:\n{screen}");
+    let shader = h.app.store.profiles_dir().join("ember/shaders/xmb-waves.glsl");
+    assert!(h.active_conf().contains(&format!("custom-shader = {}", shader.display())), "re-rendered");
+    assert!(shader.is_file());
+    assert!(h.app.status.text.contains("bundled preset"), "{}", h.app.status.text);
+    assert!(h.app.reload_pending());
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 1, "the reload hook fired");
+    // edits keep going to the renamed profile and still hot-reload
+    h.go_to_field("cursor-style");
+    h.press(KeyCode::Right);
+    h.tick();
+    assert!(h.conf("ember").contains("cursor-style = block"));
+    assert_eq!(h.reloads.get(), reloads + 2);
+}
+
+#[test]
+fn rename_errors_are_inline_and_esc_cancels() {
+    let mut h = harness();
+    h.select_profile("calm-dark");
+    for (typed, expect) in [("shd", "already exists"), ("a/b", "letters, digits"), ("has space", "letters, digits")] {
+        h.press(KeyCode::Char('r'));
+        for _ in 0..9 {
+            h.press(KeyCode::Backspace);
+        }
+        h.type_text(typed);
+        h.press(KeyCode::Enter);
+        let err = h.app.input.as_ref().expect("the box stays open").error.clone().unwrap();
+        assert!(err.contains(expect), "{typed}: {err}");
+        assert!(h.screen(140, 30).contains(expect));
+        h.press(KeyCode::Esc);
+        assert!(h.app.input.is_none());
+    }
+    // an empty name
+    h.press(KeyCode::Char('r'));
+    for _ in 0..9 {
+        h.press(KeyCode::Backspace);
+    }
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.as_ref().unwrap().error.as_deref().unwrap().contains("type a name"));
+    h.press(KeyCode::Esc);
+    // unchanged name just closes
+    h.press(KeyCode::Char('r'));
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.is_none() && h.app.status.text.contains("unchanged"));
+    assert_eq!(h.app.profiles, vec!["aurora-glass", "calm-dark", "crt-green", "shd"], "nothing was renamed");
+    // on the New-profile / (none) rows there is nothing to rename
+    h.press(KeyCode::Up);
+    h.press(KeyCode::Up);
+    assert!(h.app.top.is_some());
+    h.press(KeyCode::Char('r'));
+    assert!(h.app.input.is_none() && h.app.status.text.contains("select a profile"));
+}
+
+#[test]
+fn renaming_moves_the_picture_and_shaders_with_the_profile_in_the_tui() {
+    let mut h = harness();
+    let img = h.td.path().join("wallpaper.png");
+    fs::write(&img, "PIXELS").unwrap();
+    h.select_profile("calm-dark");
+    h.go_to_field("background-image");
+    h.press(KeyCode::Enter);
+    h.type_text(&img.display().to_string());
+    h.press(KeyCode::Enter);
+    h.select_profile("calm-dark");
+    h.press(KeyCode::Char('r'));
+    for _ in 0..9 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("calm-pic");
+    h.press(KeyCode::Enter);
+    let dir = h.app.store.profiles_dir().join("calm-pic");
+    assert_eq!(fs::read_to_string(dir.join("images/wallpaper.png")).unwrap(), "PIXELS");
+    assert!(dir.join("shaders/soft-glow.glsl").is_file());
+    assert!(!h.app.store.profiles_dir().join("calm-dark").exists());
 }

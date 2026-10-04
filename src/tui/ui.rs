@@ -205,7 +205,7 @@ fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
                 Line::raw(""),
                 Line::styled("A new profile is never applied until you press Enter on it.", dim()),
                 Line::raw(""),
-                Line::from("Also on this tab: d deletes the selected profile (asks first), e exports it."),
+                Line::from("Also on this tab: r renames, d deletes (asks first) and e exports the selected profile."),
             ];
             f.render_widget(Paragraph::new(text).block(list_block("New profile")).wrap(Wrap { trim: true }), right);
             return;
@@ -357,7 +357,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let color = if app.status.ok { Color::Green } else { Color::Red };
     let help = match app.tab {
         Tab::Profiles => {
-            "Enter apply · n new profile · d delete · e export · u off · p presets · ctrl+r reload · q quit"
+            "Enter apply · n new profile · r rename · d delete · e export · u off · p presets · ctrl+r reload · q quit"
         }
         Tab::Themes => "↑↓ select · / filter · Enter bake into profile · Esc clear · Tab next · q quit",
         Tab::Edit => "↑↓ select · Enter edit · ←→ cycle · x unset · Tab next · ctrl+r reload · q quit",

@@ -279,3 +279,30 @@ fn new_from_copies_images_and_shaders_too() {
     ok(BIN, home, &["delete", "pic", "--yes"]);
     assert!(copy.join("images/wall.png").is_file());
 }
+
+#[test]
+fn rename_via_the_cli_including_the_active_profile() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path();
+    ok(BIN, home, &["install-presets"]);
+    ok(BIN, home, &["apply", "shd", "--no-reload"]);
+    let out = ok(BIN, home, &["rename", "shd", "ember", "--no-reload"]);
+    assert!(
+        out.contains("renamed 'shd' to 'ember'") && out.contains("bundled preset") && out.contains("active profile"),
+        "{out}"
+    );
+    assert!(ok(BIN, home, &["list"]).contains("● ember"));
+    assert!(ok(BIN, home, &["status"]).contains("active profile  : ember"));
+    let active = fs::read_to_string(home.join("config/ghostty/ghostty-profiles-active.conf")).unwrap();
+    assert!(active.contains("profiles/ember/shaders/xmb-waves.glsl") && !active.contains("profiles/shd/"), "{active}");
+    assert!(home.join("config/ghostty-profiles/profiles/ember/shaders/xmb-waves.glsl").is_file());
+
+    // errors are plain and non-zero, and nothing changes
+    for args in [["rename", "ember", "calm-dark"], ["rename", "ember", "a/b"], ["rename", "nope", "x"]] {
+        let o = run(BIN, home, &args);
+        assert!(!o.status.success(), "{args:?}");
+        assert!(String::from_utf8_lossy(&o.stderr).starts_with("error:"));
+    }
+    assert!(ok(BIN, home, &["list"]).contains("● ember"));
+    assert!(ok(BIN, home, &["--help"]).contains("rename"));
+}

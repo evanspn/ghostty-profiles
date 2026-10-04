@@ -54,7 +54,7 @@ settings show immediately. Applying a profile again turns it back on. `(none)` i
 | **Shaders** | The bundled shader library plus the profile's own. `Enter` toggles, `a` toggles animation. |
 
 Keys: `Tab`/`Shift-Tab` or `1`-`4` switch tabs, `↑↓` move, `u` off (no profile), `n` new profile (a copy of the selected
-one), `d` delete (asks for `y`), `e` export, `p` install presets, `ctrl+r` force reload, `q` quit.
+one), `r` rename, `d` delete (asks for `y`), `e` export, `p` install presets, `ctrl+r` force reload, `q` quit.
 In Edit: `Enter` edits (or cycles a choice), `←→` cycle choices, `x` unsets the value.
 
 Every valid edit is **autosaved** to the profile, the active config is re-rendered, and Ghostty
@@ -74,6 +74,14 @@ On the Profiles tab press `n` (or select the `+ New profile` row and press `Ente
 The new profile appears in the list and is selected, but it is **not applied** until you press `Enter` on it. (After choosing
 option 1 your look lives only in the new profile, so until you apply it a Ghostty reload shows the defaults.) Then use the Edit
 tab as usual. Names are letters, digits, `.`, `_` and `-`, and must not already exist; mistakes are explained under the name box.
+
+## Renaming a profile
+
+In the TUI select a profile and press `r` (the box is pre-filled with the current name; Enter confirms, Esc cancels), or run
+`gpf rename OLD NEW`. The whole folder moves, so its `images/` and `shaders/` come along unchanged. Renaming the **active**
+profile keeps it active and updates the generated config (which holds absolute paths) and reloads Ghostty, so nothing is left
+pointing at the old folder. A bundled preset can be renamed too; `gpf install-presets` will then install the original again.
+Names follow the same rules as new profiles.
 
 ## Deleting a profile
 
@@ -138,7 +146,7 @@ and your config files are backed up once as `*.bak-pre-ghostty-profiles`. Adopti
 ## Commands
 
 ```
-gpf [list | apply NAME | off | delete NAME [--yes] | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
+gpf [list | apply NAME | off | rename OLD NEW | delete NAME [--yes] | new NAME [--from X] | adopt NAME | export NAME [DEST] [--with-images] [--force]
      | import PATH [--name N] | install-presets [--force] | reload | status | unlink]
 ```
 
