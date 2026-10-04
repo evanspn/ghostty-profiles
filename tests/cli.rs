@@ -306,3 +306,37 @@ fn rename_via_the_cli_including_the_active_profile() {
     assert!(ok(BIN, home, &["list"]).contains("● ember"));
     assert!(ok(BIN, home, &["--help"]).contains("rename"));
 }
+
+#[test]
+fn shader_show_set_preset_and_reset_from_the_cli() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path();
+    ok(BIN, home, &["install-presets"]);
+    let out = ok(BIN, home, &["shader", "show", "shd", "xmb-waves"]);
+    assert!(out.contains("wave_a") && out.contains("#ff6b1a") && out.contains("presets: ember, ocean"), "{out}");
+    assert!(ok(BIN, home, &["shader", "set", "shd", "xmb-waves", "wave_a", "#2FA8FF"]).contains("set wave_a"));
+    assert!(ok(BIN, home, &["shader", "show", "shd", "xmb-waves"]).contains("#2fa8ff"));
+    let shader = fs::read_to_string(home.join("config/ghostty-profiles/profiles/shd/shaders/xmb-waves.glsl")).unwrap();
+    assert!(shader.contains("P_wave_a = vec3(0.184314"), "{}", &shader[..400]);
+    ok(BIN, home, &["shader", "preset", "shd", "xmb-waves.glsl", "forest"]);
+    assert!(ok(BIN, home, &["shader", "show", "shd", "xmb-waves"]).contains("#3ddc84"));
+    ok(BIN, home, &["shader", "reset", "shd", "xmb-waves"]);
+    assert!(ok(BIN, home, &["shader", "show", "shd", "xmb-waves"]).contains("#ff6b1a"));
+    // errors are plain: bad value, unknown param, unknown preset, a shader that is not in the profile
+    for args in [
+        vec!["shader", "set", "shd", "xmb-waves", "wave_a", "nope"],
+        vec!["shader", "set", "shd", "xmb-waves", "bogus", "1"],
+        vec!["shader", "preset", "shd", "xmb-waves", "bogus"],
+        vec!["shader", "show", "shd", "aurora"],
+    ] {
+        let o = run(BIN, home, &args);
+        assert!(!o.status.success(), "{args:?}");
+        assert!(String::from_utf8_lossy(&o.stderr).starts_with("error:"), "{args:?}");
+    }
+    // changing the ACTIVE profile's shader re-renders without signalling anything (--no-reload)
+    ok(BIN, home, &["apply", "shd", "--no-reload"]);
+    assert!(
+        ok(BIN, home, &["shader", "set", "shd", "xmb-waves", "strength", "0.4", "--no-reload"])
+            .contains("set strength")
+    );
+}

@@ -111,7 +111,8 @@ fn text_of(buf: &Buffer) -> String {
 #[test]
 fn first_run_installs_the_presets_and_touches_nothing_else() {
     let h = harness();
-    assert_eq!(h.app.profiles, vec!["aurora-glass", "calm-dark", "crt-green", "shd"]);
+    assert_eq!(h.app.profiles, crate::presets::profile_names());
+    assert!(h.app.profiles.len() >= 11, "{:?}", h.app.profiles);
     assert!(h.app.status.text.contains("first run"));
     assert_eq!(h.app.active, None, "nothing is applied until the user says so");
     assert!(!h.app.store.paths.active_conf().exists());
@@ -567,7 +568,7 @@ fn name_validation_gives_a_clear_inline_error_and_keeps_the_box_open() {
         assert!(h.screen(120, 30).contains(expect), "the error is on screen for {typed:?}");
         h.press(KeyCode::Esc);
     }
-    assert_eq!(h.app.profiles.len(), 4, "nothing was created");
+    assert_eq!(h.app.profiles, crate::presets::profile_names(), "nothing was created");
     // a good name moves on to choosing the base
     h.start_new("fresh");
     assert!(h.app.wizard.is_some() && h.app.input.is_none());
@@ -861,7 +862,7 @@ fn rename_errors_are_inline_and_esc_cancels() {
     h.press(KeyCode::Char('r'));
     h.press(KeyCode::Enter);
     assert!(h.app.input.is_none() && h.app.status.text.contains("unchanged"));
-    assert_eq!(h.app.profiles, vec!["aurora-glass", "calm-dark", "crt-green", "shd"], "nothing was renamed");
+    assert_eq!(h.app.profiles, crate::presets::profile_names(), "nothing was renamed");
     // on the New-profile / (none) rows there is nothing to rename
     h.press(KeyCode::Up);
     h.press(KeyCode::Up);
@@ -1348,4 +1349,293 @@ fn small_terminals_shrink_the_wheel_then_fall_back_to_sliders_and_never_panic() 
     // the hex box still works at any size, and accepting works
     h.press(KeyCode::Enter);
     assert!(h.app.picker.is_none());
+}
+
+// ---- shader parameters in the Shaders tab ----------------------------------------------------
+
+impl Harness {
+    /// Apply `profile`, open the Shaders tab with `shader` selected (so its parameters are showing).
+    fn open_shader(&mut self, profile: &str, shader: &str) {
+        self.apply(profile);
+        self.app.tab = Tab::Shaders;
+        self.app.shader_sel = self.app.shader_rows.iter().position(|r| r.name == format!("{shader}.glsl")).unwrap();
+        self.press(KeyCode::Char('4'));
+        assert!(self.app.params.is_some(), "{shader} is enabled in {profile} and has parameters");
+    }
+
+    fn shader_text(&self, profile: &str, shader: &str) -> String {
+        fs::read_to_string(self.app.store.profiles_dir().join(profile).join(format!("shaders/{shader}.glsl"))).unwrap()
+    }
+
+    fn param_value(&self, name: &str) -> String {
+        let st = self.app.params.as_ref().unwrap();
+        let i = st.schema.params.iter().position(|p| p.name == name).unwrap();
+        st.values[i].clone()
+    }
+
+    fn go_to_param(&mut self, name: &str) {
+        let st = self.app.params.clone().unwrap();
+        let want =
+            st.schema.params.iter().position(|p| p.name == name).unwrap() + usize::from(!st.schema.presets.is_empty());
+        if !self.app.param_focus {
+            self.press(KeyCode::Right);
+        }
+        while self.app.param_sel < want {
+            self.press(KeyCode::Down);
+        }
+        while self.app.param_sel > want {
+            self.press(KeyCode::Up);
+        }
+    }
+}
+
+#[test]
+fn the_shader_list_shows_an_enabled_shaders_parameters_with_values_and_swatches() {
+    let mut h = harness();
+    h.open_shader("shd", "xmb-waves");
+    let screen = h.screen(140, 30);
+    for want in [
+        "xmb-waves: parameters",
+        "Wave color",
+        "#ff6b1a",
+        "Accent",
+        "#e31a24",
+        "Strength",
+        "0.16",
+        "Speed",
+        "preset",
+        "◂ ember ▸",
+    ] {
+        assert!(screen.contains(want), "{want}:\n{screen}");
+    }
+    // a swatch for each color, a bar for each number
+    assert_eq!(h.app.param_swatches.borrow().len(), 2);
+    assert_eq!(h.app.param_bars.borrow().len(), 2);
+    let buf = h.buffer(140, 30);
+    let (r, _) = h.app.param_swatches.borrow()[0];
+    assert_eq!(buf[(r.x, r.y)].fg, Color::Rgb(0xff, 0x6b, 0x1a), "the swatch is painted in the parameter's color");
+    // a shader that is off shows no parameters, and a shader without any says so
+    let off = h.app.shader_rows.iter().position(|r| r.name == "aurora.glsl").unwrap();
+    h.app.shader_sel = off;
+    h.press(KeyCode::Char('4'));
+    assert!(h.app.params.is_none());
+    h.press(KeyCode::Right);
+    assert!(h.app.status.text.contains("enable the shader first"));
+    let crt = h.app.shader_rows.iter().position(|r| r.name == "crt-scanlines.glsl").unwrap();
+    h.app.shader_sel = crt;
+    h.press(KeyCode::Char(' ')); // enable it
+    h.press(KeyCode::Right);
+    assert!(h.app.status.text.contains("no tunable parameters"), "{}", h.app.status.text);
+}
+
+#[test]
+fn changing_a_color_with_the_picker_rewrites_the_shader_copy_and_reloads_once() {
+    let mut h = harness();
+    h.open_shader("shd", "xmb-waves");
+    let reloads = h.reloads.get();
+    let before = h.shader_text("shd", "xmb-waves");
+    h.go_to_param("wave_a");
+    h.press(KeyCode::Char('p'));
+    assert!(h.app.picker.is_some(), "the hue wheel opens for a color parameter");
+    assert_eq!(h.buf_text(), "#ff6b1a");
+    for _ in 0..7 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("#00aaff");
+    h.press(KeyCode::Enter);
+    assert!(h.app.picker.is_none() && h.app.input.is_none());
+    let after = h.shader_text("shd", "xmb-waves");
+    assert_ne!(after, before, "the rendered shader copy changed");
+    assert!(after.contains("P_wave_a = vec3(0.000000, 0.666667, 1.000000)"), "{}", &after[..300]);
+    assert_eq!(h.param_value("wave_a"), "#00aaff");
+    assert!(
+        fs::read_to_string(h.app.store.profiles_dir().join("shd/shaders/xmb-waves.params"))
+            .unwrap()
+            .contains("wave_a = #00aaff")
+    );
+    assert!(
+        h.screen(140, 30).contains("#00aaff") && h.screen(140, 30).contains("custom"),
+        "it no longer matches a preset"
+    );
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 1, "one debounced reload");
+    // Esc in the picker leaves everything as it was
+    h.press(KeyCode::Char('p'));
+    h.press(KeyCode::Right);
+    h.press(KeyCode::Esc);
+    assert_eq!(h.param_value("wave_a"), "#00aaff");
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 1);
+    // a bad hex is refused, the box stays open
+    h.press(KeyCode::Char('p'));
+    h.type_text("zz");
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.is_some() && h.app.picker.is_some());
+    h.press(KeyCode::Esc);
+}
+
+#[test]
+fn numbers_adjust_with_arrows_and_typing_and_a_burst_reloads_once() {
+    let mut h = harness();
+    h.open_shader("shd", "xmb-waves");
+    h.go_to_param("strength");
+    let reloads = h.reloads.get();
+    h.app.debounce = Duration::from_millis(250);
+    let t0 = Instant::now();
+    // range 0..0.5 -> a step of 0.01
+    h.press(KeyCode::Right);
+    assert_eq!(h.param_value("strength"), "0.17");
+    h.app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(h.param_value("strength"), "0.22", "Shift steps five times as far");
+    h.press(KeyCode::Left);
+    h.press(KeyCode::Left);
+    assert_eq!(h.param_value("strength"), "0.2");
+    assert!(h.shader_text("shd", "xmb-waves").contains("P_strength = 0.200000"));
+    h.app.tick(t0 + Duration::from_millis(10));
+    assert_eq!(h.reloads.get(), reloads, "still inside the debounce");
+    h.app.tick(t0 + Duration::from_millis(500));
+    assert_eq!(h.reloads.get(), reloads + 1, "one reload for the whole burst");
+    // clamps at the ends
+    for _ in 0..100 {
+        h.press(KeyCode::Right);
+    }
+    assert_eq!(h.param_value("strength"), "0.5");
+    // typing a number
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.is_some() && h.app.picker.is_none(), "a number opens a plain box, not the picker");
+    for _ in 0..4 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("0.33");
+    h.press(KeyCode::Enter);
+    assert_eq!(h.param_value("strength"), "0.33");
+    h.press(KeyCode::Enter);
+    for _ in 0..4 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("7");
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.as_ref().unwrap().error.as_deref().unwrap().contains("between"), "out of range is refused");
+    assert_eq!(h.param_value("strength"), "0.33");
+    h.press(KeyCode::Esc);
+}
+
+#[test]
+fn presets_cycle_on_the_preset_row_and_r_resets_to_the_defaults() {
+    let mut h = harness();
+    h.open_shader("shd", "xmb-waves");
+    h.press(KeyCode::Right); // into the parameter list, on the preset row
+    assert_eq!(h.app.param_sel, 0);
+    h.press(KeyCode::Right);
+    assert_eq!(h.param_value("wave_a"), "#2fa8ff", "ember -> ocean");
+    assert!(h.screen(140, 30).contains("◂ ocean ▸"));
+    h.press(KeyCode::Right);
+    assert_eq!(h.param_value("wave_a"), "#3ddc84", "-> forest");
+    h.press(KeyCode::Left);
+    h.press(KeyCode::Left);
+    assert_eq!(h.param_value("wave_a"), "#ff6b1a", "<- back to ember");
+    // tweak, then reset
+    h.go_to_param("speed");
+    h.press(KeyCode::Right);
+    assert_ne!(h.param_value("speed"), "0.35");
+    h.press(KeyCode::Char('R'));
+    assert_eq!(h.param_value("speed"), "0.35");
+    assert!(!h.app.store.profiles_dir().join("shd/shaders/xmb-waves.params").exists(), "the sidecar is gone");
+    assert!(h.shader_text("shd", "xmb-waves").contains("P_speed = 0.350000"));
+    // Esc leaves the parameter list, and the shader list works again
+    h.press(KeyCode::Esc);
+    assert!(!h.app.param_focus);
+    h.press(KeyCode::Down);
+    assert!(h.app.shader_sel > 0 || h.app.shader_rows.len() == 1);
+}
+
+#[test]
+fn mouse_clicks_swatches_and_drags_bars_in_the_parameter_list() {
+    let mut h = harness();
+    h.open_shader("shd", "xmb-waves");
+    let _ = h.screen(140, 30);
+    // click a swatch -> the picker for that parameter
+    let (r, i) = h.app.param_swatches.borrow()[1]; // wave_b
+    assert_eq!(h.app.params.as_ref().unwrap().schema.params[i].name, "wave_b");
+    h.down(r.x, r.y);
+    assert!(h.app.picker.is_some());
+    assert_eq!(h.buf_text(), "#e31a24");
+    let wheel = h.app.picker_rects.borrow().wheel;
+    let _ = h.screen(140, 40);
+    let wheel = h.app.picker_rects.borrow().wheel.or(wheel).expect("wheel");
+    h.down(wheel.x + wheel.width * 4 / 5, wheel.y + wheel.height / 2);
+    h.press(KeyCode::Enter);
+    assert_ne!(h.param_value("wave_b"), "#e31a24", "the wheel click was accepted into the shader");
+    assert!(h.shader_text("shd", "xmb-waves").contains("P_wave_b"));
+    h.tick();
+    // click and drag a bar: strength spans 0..0.5 over the bar's cells
+    let _ = h.screen(140, 30);
+    let bars = h.app.param_bars.borrow().clone();
+    let (bar, bi) = bars
+        .iter()
+        .copied()
+        .find(|(_, i)| h.app.params.as_ref().unwrap().schema.params[*i].name == "strength")
+        .unwrap();
+    h.down(bar.x, bar.y);
+    assert_eq!(h.param_value("strength"), "0", "the left end is the minimum");
+    h.drag(bar.x + bar.width - 1, bar.y);
+    assert_eq!(h.param_value("strength"), "0.5", "the right end is the maximum");
+    h.drag(bar.x + bar.width / 2, bar.y);
+    let v: f64 = h.param_value("strength").parse().unwrap();
+    assert!((v - 0.25).abs() < 0.03, "{v}");
+    h.drag(bar.x + bar.width + 30, bar.y);
+    assert_eq!(h.param_value("strength"), "0.5", "past the end clamps");
+    h.up(bar.x, bar.y);
+    let settled = h.param_value("strength");
+    h.drag(bar.x, bar.y);
+    assert_eq!(h.param_value("strength"), settled, "after the button is released a drag does nothing");
+    assert!(h.app.param_focus && h.app.param_sel == bi + 1);
+    // clicking elsewhere on the tab changes nothing
+    h.down(0, 0);
+    assert_eq!(h.param_value("strength"), settled);
+}
+
+#[test]
+fn enabling_a_shader_writes_its_header_and_its_parameters_appear_with_the_profiles_values() {
+    let mut h = harness();
+    h.apply("calm-dark"); // uses soft-glow only
+    h.app.tab = Tab::Shaders;
+    let i = h.app.shader_rows.iter().position(|r| r.name == "enchant-glyphs.glsl").unwrap();
+    h.app.shader_sel = i;
+    h.press(KeyCode::Char('4'));
+    assert!(h.app.params.is_none(), "not enabled yet, so no parameters");
+    h.press(KeyCode::Enter);
+    let text = h.shader_text("calm-dark", "enchant-glyphs");
+    assert!(
+        text.contains("const vec3 P_glyph_a") && text.contains("const float P_density"),
+        "the header is written the moment it is enabled"
+    );
+    assert!(h.app.params.is_some() && h.screen(140, 30).contains("Glyph color"));
+    assert!(h.conf("calm-dark").contains("custom-shader = shaders/enchant-glyphs.glsl"));
+    assert!(h.conf("calm-dark").contains("custom-shader-animation = true"), "animated shaders turn animation on");
+    // turning it off removes the entry but the parameter values the user chose are remembered
+    h.go_to_param("density");
+    h.press(KeyCode::Right);
+    let chosen = h.param_value("density");
+    h.press(KeyCode::Esc);
+    h.press(KeyCode::Enter);
+    assert!(!h.conf("calm-dark").contains("enchant-glyphs"));
+    h.press(KeyCode::Enter);
+    assert_eq!(h.param_value("density"), chosen, "back on, with the values it had");
+}
+
+#[test]
+fn the_parameter_list_draws_at_small_sizes_without_panicking() {
+    let mut h = harness();
+    h.open_shader("shd", "xmb-waves");
+    h.press(KeyCode::Right);
+    for (w, hh) in [(140, 40), (80, 24), (60, 16), (44, 12), (30, 10), (12, 5), (3, 3)] {
+        let _ = h.screen(w, hh);
+    }
+    // open a picker in a cramped terminal too
+    h.press(KeyCode::Down);
+    h.press(KeyCode::Char('p'));
+    for (w, hh) in [(80, 24), (50, 16), (30, 10), (10, 5)] {
+        let _ = h.screen(w, hh);
+    }
 }

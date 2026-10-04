@@ -39,6 +39,11 @@ enum Cmd {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Tune a profile's shader: `gpf shader set PROFILE SHADER NAME VALUE`, `preset`, `reset`, `show`
+    Shader {
+        #[command(subcommand)]
+        action: ShaderCmd,
+    },
     /// Rename a profile (its images and shaders move with it; the active profile stays active)
     Rename {
         old: String,
@@ -96,6 +101,37 @@ enum Cmd {
     Unlink,
 }
 
+#[derive(Subcommand)]
+enum ShaderCmd {
+    /// Show a shader's parameters and current values
+    Show { profile: String, shader: String },
+    /// Set one parameter, e.g. `gpf shader set shd xmb-waves wave_a '#2fa8ff'`
+    Set {
+        profile: String,
+        shader: String,
+        name: String,
+        value: String,
+        /// Do not signal Ghostty (when the profile is the active one)
+        #[arg(long)]
+        no_reload: bool,
+    },
+    /// Apply one of the shader's named presets (e.g. ocean)
+    Preset {
+        profile: String,
+        shader: String,
+        preset: String,
+        #[arg(long)]
+        no_reload: bool,
+    },
+    /// Back to the shader's default values
+    Reset {
+        profile: String,
+        shader: String,
+        #[arg(long)]
+        no_reload: bool,
+    },
+}
+
 pub fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -139,6 +175,7 @@ fn run(cli: Cli) -> Result<()> {
             let p = store.new_profile(&name, from.as_deref())?;
             println!("created '{}' in {}", p.name, p.dir.display());
         }
+        Cmd::Shader { action } => shader_cmd(&store, action)?,
         Cmd::Rename { old, new, no_reload } => {
             let was_active = store.rename(&old, &new)?;
             println!("renamed '{old}' to '{new}'");
@@ -225,6 +262,57 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("nothing to remove");
             }
+        }
+    }
+    Ok(())
+}
+
+fn shader_rel(shader: &str) -> String {
+    let name = shader.strip_suffix(".glsl").unwrap_or(shader);
+    format!("shaders/{name}.glsl")
+}
+
+fn shader_cmd(store: &Store, action: ShaderCmd) -> Result<()> {
+    let reload_if_active = |store: &Store, profile: &str, no_reload: bool| -> Result<()> {
+        if store.active_name().as_deref() == Some(profile) {
+            store.rerender_active()?;
+            if !no_reload {
+                println!("{}", SignalReloader.reload().detail);
+            }
+        }
+        Ok(())
+    };
+    match action {
+        ShaderCmd::Show { profile, shader } => {
+            let p = store.load(&profile)?;
+            let rel = shader_rel(&shader);
+            let Some(st) = p.shader_param_state(&rel) else {
+                bail!("'{shader}' is not enabled in '{profile}' or has no tunable parameters")
+            };
+            for (param, value) in st.schema.params.iter().zip(&st.values) {
+                println!("{:<14} {value:<9} {}", param.name, param.label);
+            }
+            if !st.schema.presets.is_empty() {
+                println!(
+                    "presets: {}",
+                    st.schema.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+        }
+        ShaderCmd::Set { profile, shader, name, value, no_reload } => {
+            store.load(&profile)?.set_shader_params(&shader_rel(&shader), &[(name.clone(), value)])?;
+            println!("set {name} on {shader} in '{profile}'");
+            reload_if_active(store, &profile, no_reload)?;
+        }
+        ShaderCmd::Preset { profile, shader, preset, no_reload } => {
+            store.load(&profile)?.apply_shader_preset(&shader_rel(&shader), &preset)?;
+            println!("applied preset '{preset}' to {shader} in '{profile}'");
+            reload_if_active(store, &profile, no_reload)?;
+        }
+        ShaderCmd::Reset { profile, shader, no_reload } => {
+            store.load(&profile)?.reset_shader_params(&shader_rel(&shader))?;
+            println!("reset {shader} in '{profile}' to its defaults");
+            reload_if_active(store, &profile, no_reload)?;
         }
     }
     Ok(())

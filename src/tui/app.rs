@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, Mo
 use ratatui::layout::Rect;
 
 use super::color::{self, Hsv, WheelGeom};
+use crate::shaderparams as sp;
 
 use super::fields::{self, Field, Kind};
 use crate::ghostty::{self, Reloader, Theme};
@@ -49,6 +50,8 @@ pub enum InputKind {
     Field(usize),
     /// Renaming the named profile.
     Rename(String),
+    /// Setting a parameter (by name) of the selected shader: a color (with the picker) or a number.
+    ShaderParam(String),
     NewProfile,
     Export,
     Filter,
@@ -172,6 +175,16 @@ pub struct App {
     pub shader_rows: Vec<ShaderRow>,
     pub shader_sel: usize,
 
+    /// The selected shader's tunable parameters, when it is enabled in the profile and has some.
+    pub params: Option<crate::profile::ParamState>,
+    /// The cursor is in the parameter list (right pane) of the Shaders tab, not the shader list.
+    pub param_focus: bool,
+    pub param_sel: usize,
+    /// Where the parameter swatches and slider bars were drawn: (area, parameter index).
+    pub param_swatches: RefCell<Vec<(Rect, usize)>>,
+    pub param_bars: RefCell<Vec<(Rect, usize)>>,
+    float_drag: Option<usize>,
+
     pub picker: Option<Picker>,
     pub picker_rects: RefCell<PickerRects>,
     /// Clickable color swatches in the Edit list: (area, field index). Set by the drawing code.
@@ -207,6 +220,12 @@ impl App {
             field_sel: 0,
             shader_rows: Vec::new(),
             shader_sel: 0,
+            params: None,
+            param_focus: false,
+            param_sel: 0,
+            param_swatches: RefCell::new(Vec::new()),
+            param_bars: RefCell::new(Vec::new()),
+            float_drag: None,
             picker: None,
             picker_rects: RefCell::new(PickerRects::default()),
             swatch_rects: RefCell::new(Vec::new()),
@@ -319,10 +338,10 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab => self.goto_tab(1),
             KeyCode::BackTab => self.goto_tab(-1),
-            KeyCode::Char('1') => self.tab = Tab::Profiles,
-            KeyCode::Char('2') => self.tab = Tab::Themes,
-            KeyCode::Char('3') => self.tab = Tab::Edit,
-            KeyCode::Char('4') => self.tab = Tab::Shaders,
+            KeyCode::Char(c @ '1'..='4') => {
+                self.tab = Tab::ALL[(c as u8 - b'1') as usize];
+                self.entered_tab();
+            }
             KeyCode::Char('n') => self.begin_new(),
             KeyCode::Char('r') => self.begin_rename(),
             KeyCode::Char('d') => self.begin_delete(),
@@ -339,6 +358,15 @@ impl App {
     fn goto_tab(&mut self, by: isize) {
         let n = Tab::ALL.len() as isize;
         self.tab = Tab::ALL[((self.tab.index() as isize + by).rem_euclid(n)) as usize];
+        self.entered_tab();
+    }
+
+    fn entered_tab(&mut self) {
+        if self.tab == Tab::Shaders {
+            self.refresh_params(true);
+        } else {
+            self.param_focus = false;
+        }
     }
 
     fn step(sel: &mut usize, len: usize, code: KeyCode) {
@@ -730,14 +758,198 @@ impl App {
         }
         self.shader_sel = self.shader_sel.min(rows.len().saturating_sub(1));
         self.shader_rows = rows;
+        self.refresh_params(false);
+    }
+
+    /// Re-read the selected shader's parameters. `write` lets this bring an untouched copy of an older
+    /// shader up to the current version (only done on the Shaders tab, never while just browsing).
+    fn refresh_params(&mut self, write: bool) {
+        self.params = None;
+        let (Some(p), Some(row)) = (self.profile.as_ref(), self.shader_rows.get(self.shader_sel)) else { return };
+        if !row.enabled {
+            self.param_focus = false;
+            return;
+        }
+        if write {
+            let _ = p.render_shaders();
+        }
+        self.params = p.shader_param_state(&format!("shaders/{}", row.name));
+        let rows = self.param_row_count();
+        self.param_sel = self.param_sel.min(rows.saturating_sub(1));
+        if self.params.is_none() {
+            self.param_focus = false;
+        }
+    }
+
+    /// Rows in the parameter list: the preset row (when the shader has presets) and one per parameter.
+    pub fn param_row_count(&self) -> usize {
+        self.params.as_ref().map(|p| p.schema.params.len() + usize::from(!p.schema.presets.is_empty())).unwrap_or(0)
+    }
+
+    fn has_preset_row(&self) -> bool {
+        self.params.as_ref().is_some_and(|p| !p.schema.presets.is_empty())
+    }
+
+    /// The parameter under the cursor (`None` on the preset row).
+    fn param_at_cursor(&self) -> Option<usize> {
+        let first = usize::from(self.has_preset_row());
+        self.param_sel.checked_sub(first)
     }
 
     fn shaders_key(&mut self, key: KeyEvent) {
+        if self.param_focus && self.params.is_some() {
+            self.params_key(key);
+            return;
+        }
+        let before = self.shader_sel;
         Self::step(&mut self.shader_sel, self.shader_rows.len(), key.code);
+        if self.shader_sel != before {
+            self.param_sel = 0;
+            self.refresh_params(true);
+        }
         match key.code {
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_shader(),
             KeyCode::Char('a') => self.toggle_animation(),
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.params.is_some() {
+                    self.param_focus = true;
+                } else if self.shader_rows.get(self.shader_sel).is_some_and(|r| r.enabled) {
+                    self.say("this shader has no tunable parameters", false);
+                } else {
+                    self.say("enable the shader first (Enter), then → edits its parameters", false);
+                }
+            }
+            KeyCode::Char('R') => self.reset_params(),
             _ => {}
+        }
+    }
+
+    fn params_key(&mut self, key: KeyEvent) {
+        let rows = self.param_row_count();
+        let big = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Esc => self.param_focus = false,
+            KeyCode::Up | KeyCode::Char('k') => self.param_sel = self.param_sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.param_sel = (self.param_sel + 1).min(rows.saturating_sub(1)),
+            KeyCode::Char('R') => self.reset_params(),
+            KeyCode::Left | KeyCode::Char('h') => self.adjust_param(false, big),
+            KeyCode::Right | KeyCode::Char('l') => self.adjust_param(true, big),
+            KeyCode::Char('p') | KeyCode::Enter => self.edit_param(),
+            _ => {}
+        }
+    }
+
+    /// Left/Right on a parameter row: cycle the preset, or nudge a number (a color has no step).
+    fn adjust_param(&mut self, forward: bool, big: bool) {
+        let Some(state) = self.params.clone() else { return };
+        let Some(i) = self.param_at_cursor() else {
+            // the preset row
+            let n = state.schema.presets.len();
+            let cur = sp::matching_preset(&state.schema, &state.values)
+                .and_then(|m| state.schema.presets.iter().position(|p| p.name == m.name));
+            let next = match (cur, forward) {
+                (None, true) => 0,
+                (None, false) => n - 1,
+                (Some(c), true) => (c + 1) % n,
+                (Some(c), false) => (c + n - 1) % n,
+            };
+            self.apply_preset(&state.schema.presets[next].name.clone());
+            return;
+        };
+        let (Some(param), Some(value)) = (state.schema.params.get(i), state.values.get(i)) else { return };
+        if let sp::Kind::Float { min, max } = param.kind {
+            let step = (max - min) / 50.0 * if big { 5.0 } else { 1.0 };
+            let cur = value.parse::<f64>().unwrap_or(min);
+            let next = (cur + if forward { step } else { -step }).clamp(min, max);
+            self.set_param(&param.name.clone(), &sp::format_number(next));
+        }
+    }
+
+    /// Enter / `p` on a parameter row: a color opens the picker, a number opens a typed box, the preset
+    /// row moves to the next preset.
+    fn edit_param(&mut self) {
+        let Some(state) = self.params.clone() else { return };
+        let Some(i) = self.param_at_cursor() else {
+            self.adjust_param(true, false);
+            return;
+        };
+        let (Some(param), Some(value)) = (state.schema.params.get(i), state.values.get(i)) else { return };
+        match param.kind {
+            sp::Kind::Color => self.open_shader_color(i),
+            sp::Kind::Float { min, max } => {
+                self.input = Some(Input {
+                    kind: InputKind::ShaderParam(param.name.clone()),
+                    title: format!("{} ({min}..{max})", param.label),
+                    buf: value.clone(),
+                    error: None,
+                });
+            }
+        }
+    }
+
+    /// Open the color picker (and its hex box) for color parameter `i` of the selected shader.
+    pub fn open_shader_color(&mut self, i: usize) {
+        let Some(state) = self.params.clone() else { return };
+        let (Some(param), Some(value)) = (state.schema.params.get(i), state.values.get(i)) else { return };
+        let hsv = color::hex_to_hsv(value).unwrap_or(Hsv { h: 0.0, s: 0.0, v: 0.5 });
+        self.param_focus = true;
+        self.param_sel = i + usize::from(self.has_preset_row());
+        self.input = Some(Input {
+            kind: InputKind::ShaderParam(param.name.clone()),
+            title: format!("{} (#rrggbb): wheel, mouse or type; Enter accepts, Esc cancels", param.label),
+            buf: value.clone(),
+            error: None,
+        });
+        self.picker = Some(Picker { hsv, drag: None });
+    }
+
+    /// Change one parameter of the selected shader: validates, saves the sidecar, regenerates the shader
+    /// copy and (when the profile is active) schedules the usual debounced reload.
+    pub fn set_param(&mut self, name: &str, value: &str) -> bool {
+        let (Some(p), Some(rel)) = (self.profile.as_ref(), self.params.as_ref().map(|s| s.rel.clone())) else {
+            return false;
+        };
+        match p.set_shader_params(&rel, &[(name.to_string(), value.to_string())]) {
+            Ok(()) => {
+                let label = self
+                    .params
+                    .as_ref()
+                    .and_then(|s| s.schema.params.iter().find(|q| q.name == name))
+                    .map(|q| q.label.clone())
+                    .unwrap_or_else(|| name.to_string());
+                self.params = self.profile.as_ref().and_then(|p| p.shader_param_state(&rel));
+                self.commit(&label);
+                true
+            }
+            Err(e) => {
+                self.say(format!("{name}: {e:#}"), false);
+                false
+            }
+        }
+    }
+
+    fn apply_preset(&mut self, preset: &str) {
+        let (Some(p), Some(rel)) = (self.profile.as_ref(), self.params.as_ref().map(|s| s.rel.clone())) else { return };
+        match p.apply_shader_preset(&rel, preset) {
+            Ok(()) => {
+                self.params = self.profile.as_ref().and_then(|p| p.shader_param_state(&rel));
+                self.commit(&format!("preset {preset}"));
+            }
+            Err(e) => self.say(format!("{e:#}"), false),
+        }
+    }
+
+    fn reset_params(&mut self) {
+        let (Some(p), Some(rel)) = (self.profile.as_ref(), self.params.as_ref().map(|s| s.rel.clone())) else {
+            self.say("no tunable shader selected", false);
+            return;
+        };
+        match p.reset_shader_params(&rel) {
+            Ok(()) => {
+                self.params = self.profile.as_ref().and_then(|p| p.shader_param_state(&rel));
+                self.commit("shader parameters reset to defaults");
+            }
+            Err(e) => self.say(format!("{e:#}"), false),
         }
     }
 
@@ -776,10 +988,14 @@ impl App {
             if animated && p.get("custom-shader-animation").is_none() {
                 p.set("custom-shader-animation", "true");
             }
+            // write the shader's parameter header (defaults, or the profile's saved values)
+            let _ = p.render_shaders();
         }
         let what = format!("shader {} {}", row.name, if row.enabled { "off" } else { "on" });
         self.commit(&what);
+        self.param_focus = false;
         self.rebuild_shader_rows();
+        self.refresh_params(true);
     }
 
     pub fn toggle_animation(&mut self) {
@@ -873,8 +1089,11 @@ impl App {
         let (col, row) = (m.column, m.row);
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                let idle = self.input.is_none() && self.wizard.is_none() && self.confirm_delete.is_none();
                 if self.picker.is_some() {
                     self.picker_press(col, row);
+                } else if self.tab == Tab::Shaders && idle {
+                    self.shader_press(col, row);
                 } else if self.tab == Tab::Edit
                     && self.input.is_none()
                     && self.wizard.is_none()
@@ -886,13 +1105,49 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) => self.picker_drag(col, row),
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(i) = self.float_drag {
+                    self.drag_float(i, col);
+                } else {
+                    self.picker_drag(col, row);
+                }
+            }
             MouseEventKind::Up(MouseButton::Left) => {
+                self.float_drag = None;
                 if let Some(p) = self.picker.as_mut() {
                     p.drag = None;
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A click in the Shaders tab's parameter list: a swatch opens the picker, a slider sets the number.
+    fn shader_press(&mut self, col: u16, row: u16) {
+        let swatch = self.param_swatches.borrow().iter().find(|(r, _)| contains(*r, col, row)).map(|(_, i)| *i);
+        if let Some(i) = swatch {
+            self.open_shader_color(i);
+            return;
+        }
+        let bar = self.param_bars.borrow().iter().find(|(r, _)| contains(*r, col, row)).map(|(_, i)| *i);
+        if let Some(i) = bar {
+            self.param_focus = true;
+            self.param_sel = i + usize::from(self.has_preset_row());
+            self.float_drag = Some(i);
+            self.drag_float(i, col);
+        }
+    }
+
+    fn drag_float(&mut self, i: usize, col: u16) {
+        let bar = self.param_bars.borrow().iter().find(|(_, p)| *p == i).map(|(r, _)| *r);
+        let (Some(bar), Some(state)) = (bar, self.params.clone()) else { return };
+        let Some(param) = state.schema.params.get(i) else { return };
+        if let sp::Kind::Float { min, max } = param.kind {
+            let frac = color::bar_fraction(col as i32 - bar.x as i32, bar.width) as f64;
+            let value = sp::format_number(min + frac * (max - min));
+            if state.values.get(i) != Some(&value) {
+                self.set_param(&param.name.clone(), &value);
+            }
         }
     }
 
@@ -1019,6 +1274,12 @@ impl App {
                 }
                 let copy_from = self.current_name().map(str::to_string);
                 self.wizard = Some(Wizard { name, step: WizardStep::Base(0), copy_from });
+            }
+            InputKind::ShaderParam(ref name) => {
+                if !self.set_param(name, &input.buf) {
+                    let error = Some(self.status.text.clone());
+                    self.input = Some(Input { error, ..input });
+                }
             }
             InputKind::Rename(ref old) => {
                 let new = input.buf.trim().to_string();

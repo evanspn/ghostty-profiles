@@ -281,6 +281,7 @@ impl Store {
     // ---- activation -------------------------------------------------------------
     pub fn apply(&self, name: &str) -> Result<PathBuf> {
         let prof = self.load(name)?;
+        prof.render_shaders()?;
         let conf = self.paths.active_conf();
         atomic_write(&conf, &prof.render())?;
         atomic_write(&self.paths.active_file(), name)?;
@@ -309,7 +310,9 @@ impl Store {
     pub fn rerender_active(&self) -> Result<bool> {
         match self.active_name() {
             Some(n) => {
-                atomic_write(&self.paths.active_conf(), &self.load(&n)?.render())?;
+                let prof = self.load(&n)?;
+                prof.render_shaders()?;
+                atomic_write(&self.paths.active_conf(), &prof.render())?;
                 Ok(true)
             }
             None => Ok(false),
@@ -690,6 +693,202 @@ mod tests {
         s.rename("calm-dark", "my-calm").unwrap();
         assert_eq!(s.install_presets(false).unwrap(), vec!["calm-dark"], "the original comes back");
         assert!(s.exists("my-calm") && s.exists("calm-dark"));
+    }
+
+    // ---- shader parameters ----------------------------------------------------------------
+
+    fn shader_rel(name: &str) -> String {
+        format!("shaders/{name}.glsl")
+    }
+
+    #[test]
+    fn installed_presets_carry_a_parameter_header_with_the_defaults() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        let p = s.load("shd").unwrap();
+        let text = fs::read_to_string(p.dir.join("shaders/xmb-waves.glsl")).unwrap();
+        assert!(text.contains("const vec3 P_wave_a = vec3(1.000000, 0.419608, 0.101961);"), "the same ember as before");
+        assert!(text.contains("const float P_strength = 0.160000;") && text.contains("void mainImage"));
+        let st = p.shader_param_state(&shader_rel("xmb-waves")).unwrap();
+        assert_eq!(st.schema.params.len(), 4);
+        assert_eq!(st.values, vec!["#ff6b1a", "#e31a24", "0.16", "0.35"]);
+        // every bundled preset profile's shaders are valid and rendered (no profile references a missing one)
+        for n in presets::profile_names() {
+            let p = s.load(&n).unwrap();
+            for rel in p.shaders() {
+                let t = fs::read_to_string(p.resolve_asset(&rel)).unwrap();
+                if crate::shaderparams::has_annotations(&t) {
+                    assert!(t.contains("P_"), "{n}: {rel} has parameters but no generated header");
+                    assert!(p.shader_param_state(&rel).is_some(), "{n}: {rel} annotations do not parse");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn setting_a_parameter_writes_the_sidecar_and_regenerates_the_shader_copy() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        let p = s.load("shd").unwrap();
+        let rel = shader_rel("xmb-waves");
+        p.set_shader_params(&rel, &[("wave_a".into(), "#00ff80".into()), ("strength".into(), "0.3".into())]).unwrap();
+        let text = fs::read_to_string(p.dir.join(&rel)).unwrap();
+        assert!(
+            text.contains("P_wave_a = vec3(0.000000, 1.000000, 0.501961)") && text.contains("P_strength = 0.300000"),
+            "{}",
+            &text[..300]
+        );
+        assert_eq!(text.matches("ghostty-profiles parameters").count(), 1, "one header, never stacked");
+        let side = fs::read_to_string(p.dir.join("shaders/xmb-waves.params")).unwrap();
+        assert!(
+            side.contains("wave_a = #00ff80") && side.contains("strength = 0.3") && side.contains("wave_b = #e31a24"),
+            "{side}"
+        );
+        assert_eq!(p.shader_param_state(&rel).unwrap().values[0], "#00ff80");
+        // bad values are refused and change nothing
+        let before = fs::read_to_string(p.dir.join(&rel)).unwrap();
+        for (name, v) in [("wave_a", "zz"), ("strength", "9"), ("strength", "x"), ("nope", "1")] {
+            assert!(p.set_shader_params(&rel, &[(name.into(), v.into())]).is_err(), "{name}={v}");
+        }
+        assert_eq!(fs::read_to_string(p.dir.join(&rel)).unwrap(), before);
+        // presets: their values over the defaults; unknown preset refused
+        p.apply_shader_preset(&rel, "ocean").unwrap();
+        assert_eq!(p.shader_param_state(&rel).unwrap().values, vec!["#2fa8ff", "#4f5bff", "0.18", "0.35"]);
+        assert!(p.apply_shader_preset(&rel, "nope").is_err());
+        // reset: back to the defaults, sidecar gone
+        p.reset_shader_params(&rel).unwrap();
+        assert!(!p.dir.join("shaders/xmb-waves.params").exists());
+        assert_eq!(p.shader_param_state(&rel).unwrap().values, vec!["#ff6b1a", "#e31a24", "0.16", "0.35"]);
+        assert!(fs::read_to_string(p.dir.join(&rel)).unwrap().contains("P_wave_a = vec3(1.000000, 0.419608"));
+        // a shader without parameters says so
+        assert!(p.set_shader_params("shaders/nothing.glsl", &[("x".into(), "1".into())]).is_err());
+    }
+
+    #[test]
+    fn apply_regenerates_the_shader_from_the_sidecar_and_the_active_conf_points_at_it() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.apply("shd").unwrap();
+        let p = s.load("shd").unwrap();
+        // someone edits the sidecar by hand (or an import brought it): apply picks it up
+        fs::write(p.dir.join("shaders/xmb-waves.params"), "wave_a = #0000ff\nstrength = 0.4\n").unwrap();
+        s.apply("shd").unwrap();
+        let text = fs::read_to_string(p.dir.join("shaders/xmb-waves.glsl")).unwrap();
+        assert!(
+            text.contains("P_wave_a = vec3(0.000000, 0.000000, 1.000000)") && text.contains("P_strength = 0.400000")
+        );
+        assert!(fs::read_to_string(s.paths.active_conf()).unwrap().contains("shaders/xmb-waves.glsl"));
+        // rerender_active (after any edit) keeps it in step too
+        fs::write(p.dir.join("shaders/xmb-waves.params"), "strength = 0.1\n").unwrap();
+        s.rerender_active().unwrap();
+        assert!(fs::read_to_string(p.dir.join("shaders/xmb-waves.glsl")).unwrap().contains("P_strength = 0.100000"));
+    }
+
+    #[test]
+    fn an_untouched_copy_of_an_older_shader_is_upgraded_but_an_edited_one_is_left_alone() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.apply("shd").unwrap();
+        let p = s.load("shd").unwrap();
+        let file = p.dir.join("shaders/xmb-waves.glsl");
+        // what version 0.1 installed, byte for byte: no annotations, hard-coded colors
+        let old = include_str!("../presets/legacy/xmb-waves-0.1.glsl");
+        fs::write(&file, old).unwrap();
+        s.apply("shd").unwrap();
+        let now = fs::read_to_string(&file).unwrap();
+        assert!(now.contains("// @color wave_a") && now.contains("P_wave_a"), "upgraded to the tunable version");
+        assert!(p.shader_param_state("shaders/xmb-waves.glsl").is_some());
+        // the user's own edit of an old copy is never overwritten
+        let edited = format!("{old}\n// my tweak\n");
+        fs::write(&file, &edited).unwrap();
+        s.apply("shd").unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), edited);
+        // and an old aurora (the one that washed the top of the window) is upgraded to the background-only one
+        s.install_presets(true).unwrap();
+        let pa = s.load("aurora-glass").unwrap();
+        fs::write(pa.dir.join("shaders/aurora.glsl"), include_str!("../presets/legacy/aurora-0.1.glsl")).unwrap();
+        s.apply("aurora-glass").unwrap();
+        let up = fs::read_to_string(pa.dir.join("shaders/aurora.glsl")).unwrap();
+        assert!(up.contains("bgMask") && up.contains("never blur") || up.contains("can never blur"), "{}", &up[..200]);
+    }
+
+    #[test]
+    fn export_and_import_carry_the_values_and_a_hostile_sidecar_still_cannot_inject_code() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        let p = s.load("shd").unwrap();
+        p.set_shader_params("shaders/xmb-waves.glsl", &[("wave_a".into(), "#12ab34".into())]).unwrap();
+        let dest = sb._td.path().join("shared");
+        p.export(&dest, false, false).unwrap();
+        assert!(dest.join("shaders/xmb-waves.params").is_file(), "the values travel with the shader");
+        assert!(
+            fs::read_to_string(dest.join("shaders/xmb-waves.glsl")).unwrap().contains("P_wave_a"),
+            "and so does the rendered shader"
+        );
+        let (name, removed) = s.import_profile(&dest, Some("theirs")).unwrap();
+        assert!(removed.is_empty(), "{removed:?}");
+        let imported = s.load(&name).unwrap();
+        assert_eq!(imported.shader_param_state("shaders/xmb-waves.glsl").unwrap().values[0], "#12ab34");
+
+        // now a hostile one: command lines AND a sidecar full of attempts to smuggle GLSL
+        let evil = sb._td.path().join("evil");
+        fs::create_dir_all(evil.join("shaders")).unwrap();
+        fs::write(
+            evil.join("profile.conf"),
+            "background = #000000\ncommand = /bin/sh\ncustom-shader = shaders/xmb-waves.glsl\n",
+        )
+        .unwrap();
+        fs::copy(dest.join("shaders/xmb-waves.glsl"), evil.join("shaders/xmb-waves.glsl")).unwrap();
+        fs::write(
+            evil.join("shaders/xmb-waves.params"),
+            "wave_a = #fff); evil_one(); //\nstrength = 0.1; discard;\nextra = float evil_two = 1.0;\nwave_b = #00ff00\n",
+        )
+        .unwrap();
+        let (name, removed) = s.import_profile(&evil, Some("evil")).unwrap();
+        assert_eq!(removed, vec!["command"], "the allowlist still applies");
+        s.apply(&name).unwrap();
+        let text = fs::read_to_string(s.profiles_dir().join("evil/shaders/xmb-waves.glsl")).unwrap();
+        for bad in ["evil_one", "evil_two", "discard"] {
+            assert!(!text.contains(bad), "{bad} got into the shader");
+        }
+        assert!(text.contains("P_wave_b = vec3(0.000000, 1.000000, 0.000000)"), "the one valid value was used");
+        assert!(
+            text.contains("P_wave_a = vec3(1.000000, 0.419608, 0.101961)"),
+            "the invalid ones fell back to defaults"
+        );
+    }
+
+    #[test]
+    fn rename_and_copy_keep_the_parameters() {
+        let sb = sandbox();
+        let s = &sb.store;
+        s.install_presets(false).unwrap();
+        s.load("shd")
+            .unwrap()
+            .set_shader_params("shaders/xmb-waves.glsl", &[("wave_b".into(), "#101010".into())])
+            .unwrap();
+        s.new_profile("copy", Some("shd")).unwrap();
+        assert_eq!(s.load("copy").unwrap().shader_param_state("shaders/xmb-waves.glsl").unwrap().values[1], "#101010");
+        s.rename("copy", "moved").unwrap();
+        assert_eq!(s.load("moved").unwrap().shader_param_state("shaders/xmb-waves.glsl").unwrap().values[1], "#101010");
+    }
+
+    #[test]
+    fn the_aurora_glass_profile_no_longer_blurs_the_window() {
+        let sb = sandbox();
+        sb.store.install_presets(false).unwrap();
+        let p = sb.store.load("aurora-glass").unwrap();
+        assert_eq!(p.get("background-blur"), None, "no blur of whatever is behind the window");
+        let shader = fs::read_to_string(p.dir.join("shaders/aurora.glsl")).unwrap();
+        assert!(
+            !shader.contains("texture(iChannel0, uv +") && shader.matches("texture(").count() == 1,
+            "one sample of the pixel itself, no neighbours"
+        );
     }
 
     #[test]

@@ -45,6 +45,23 @@ pub fn shader_source(name: &str) -> Option<&'static str> {
     PRESETS.get_file(format!("shaders/{name}"))?.contents_utf8()
 }
 
+/// Shader copies that earlier releases installed into profiles, byte for byte. A profile whose copy
+/// still matches one of these (so the user never changed it) is upgraded to the current library
+/// version, which is tunable and, for `aurora`, no longer a wash over the whole window.
+const LEGACY: [(&str, &str); 3] = [
+    ("xmb-waves.glsl", include_str!("../presets/legacy/xmb-waves-0.1.glsl")),
+    ("aurora.glsl", include_str!("../presets/legacy/aurora-0.1.glsl")),
+    ("soft-glow.glsl", include_str!("../presets/legacy/soft-glow-0.1.glsl")),
+];
+
+/// The current library version of `file_name` if `text` is an untouched copy of an older release.
+pub fn upgrade_legacy_shader(file_name: &str, text: &str) -> Option<&'static str> {
+    LEGACY
+        .iter()
+        .find(|(name, old)| *name == file_name && old.trim() == text.trim())
+        .and_then(|(name, _)| shader_source(name))
+}
+
 /// Write a bundled profile into `dest`: its `profile.conf`, plus a copy of every
 /// shader it references from the library into `dest/shaders/`.
 pub fn install_profile(name: &str, dest: &Path) -> Result<()> {
@@ -59,8 +76,17 @@ pub fn install_profile(name: &str, dest: &Path) -> Result<()> {
             let src = shader_source(file).with_context(|| format!("preset '{name}' needs missing shader {file}"))?;
             fs::create_dir_all(dest.join("shaders"))?;
             crate::store::atomic_write(&dest.join(rel), src)?;
+            // a preset may also ship the values for its shader's parameters
+            let sidecar = crate::profile::sidecar_rel(rel);
+            if let Some(f) = PRESETS.get_file(format!("profiles/{name}/{sidecar}"))
+                && let Some(text) = f.contents_utf8()
+            {
+                crate::store::atomic_write(&dest.join(&sidecar), text)?;
+            }
         }
     }
+    // write each shader's parameter header (defaults, or the values the preset shipped)
+    crate::profile::Profile::load(dest)?.render_shaders()?;
     Ok(())
 }
 

@@ -132,6 +132,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     color::set_truecolor(app.truecolor);
     *app.picker_rects.borrow_mut() = Default::default();
     app.swatch_rects.borrow_mut().clear();
+    app.param_swatches.borrow_mut().clear();
+    app.param_bars.borrow_mut().clear();
     let [tabs, body, footer] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)]).areas(f.area());
 
@@ -358,12 +360,22 @@ fn draw_shaders(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let mut st = ListState::default().with_selected((!app.shader_rows.is_empty()).then_some(app.shader_sel));
-    f.render_stateful_widget(List::new(items).block(list_block("Shaders")).highlight_style(highlight()), left, &mut st);
+    let list_style = if app.param_focus { dim() } else { Style::default() };
+    f.render_stateful_widget(
+        List::new(items).style(list_style).block(list_block("Shaders")).highlight_style(highlight()),
+        left,
+        &mut st,
+    );
 
+    if let Some(state) = &app.params {
+        draw_params(f, right, app, state);
+        return;
+    }
     let anim = app.profile.as_ref().and_then(|p| p.get("custom-shader-animation")).unwrap_or_else(|| "unset".into());
     let text = vec![
         Line::from("Enter / space toggles the shader for this profile."),
         Line::from("a toggles animation (custom-shader-animation)."),
+        Line::from("Enable a shader, then → edits its colors and numbers."),
         Line::raw(""),
         Line::from(format!("animation: {anim}")),
         Line::raw(""),
@@ -376,6 +388,79 @@ fn draw_shaders(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(text).block(list_block("About")).wrap(Wrap { trim: true }), right);
 }
 
+/// The selected shader's tunable parameters: a preset row, then one row per color or number.
+fn draw_params(f: &mut Frame, area: Rect, app: &App, state: &crate::profile::ParamState) {
+    use crate::shaderparams as sp;
+    let name = state.rel.rsplit('/').next().unwrap_or(&state.rel).trim_end_matches(".glsl");
+    let block = list_block(&format!("{name}: parameters"));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let has_preset = !state.schema.presets.is_empty();
+    let mut lines: Vec<Line> = Vec::new();
+    let mut swatches = app.param_swatches.borrow_mut();
+    let mut bars = app.param_bars.borrow_mut();
+    let col = inner.x + 28;
+    let mut row = 0usize;
+    let mark = |sel: bool| Span::styled(if sel && app.param_focus { "▸ " } else { "  " }, Style::default().fg(ACCENT));
+    let sel_style = |sel: bool| {
+        if sel && app.param_focus { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() }
+    };
+
+    if has_preset {
+        let sel = app.param_sel == 0;
+        let current = sp::matching_preset(&state.schema, &state.values)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "custom".into());
+        lines.push(Line::from(vec![
+            mark(sel),
+            Span::styled(format!("{:<16} ", "preset"), sel_style(sel)),
+            Span::styled(format!("◂ {current} ▸"), Style::default().fg(ACCENT)),
+        ]));
+        row += 1;
+    }
+    for (i, (p, v)) in state.schema.params.iter().zip(&state.values).enumerate() {
+        let sel = app.param_sel == i + usize::from(has_preset);
+        let label: String = p.label.chars().take(16).collect();
+        let mut spans =
+            vec![mark(sel), Span::styled(format!("{label:<16} "), sel_style(sel)), Span::raw(format!("{v:<8} "))];
+        let y = inner.y + row as u16;
+        match p.kind {
+            sp::Kind::Color => {
+                spans.push(swatch(Some(v)));
+                if y < inner.y + inner.height && col + 2 <= inner.x + inner.width {
+                    swatches.push((Rect { x: col, y, width: 2, height: 1 }, i));
+                }
+            }
+            sp::Kind::Float { min, max } => {
+                let width = (inner.x + inner.width).saturating_sub(col).min(16);
+                if width >= 4 {
+                    let frac = ((v.parse::<f64>().unwrap_or(min) - min) / (max - min)).clamp(0.0, 1.0) as f32;
+                    let at = color::bar_cell(frac, width);
+                    let bar: String = (0..width).map(|c| if c <= at { '█' } else { '░' }).collect();
+                    spans.push(Span::styled(bar, Style::default().fg(ACCENT)));
+                    if y < inner.y + inner.height {
+                        bars.push((Rect { x: col, y, width, height: 1 }, i));
+                    }
+                }
+            }
+        }
+        lines.push(Line::from(spans));
+        row += 1;
+    }
+    drop((swatches, bars));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        if app.param_focus {
+            "↑↓ move · ←→ adjust or cycle · Enter/p color picker · R reset · Esc back"
+        } else {
+            "→ edit these · R reset to defaults"
+        },
+        dim(),
+    ));
+    lines.push(Line::styled("click a swatch for the picker, click or drag a bar to set a number", dim()));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let color = if app.status.ok { Color::Green } else { Color::Red };
     let help = match app.tab {
@@ -386,7 +471,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Tab::Edit => {
             "↑↓ select · Enter edit · p color picker (or click a swatch) · ←→ cycle · x unset · ctrl+r reload · q quit"
         }
-        Tab::Shaders => "↑↓ select · Enter toggle · a animation · Tab next · q quit",
+        Tab::Shaders => "↑↓ select · Enter toggle · → parameters · R reset · a animation · Tab next · q quit",
     };
     let text = vec![Line::styled(app.status.text.clone(), Style::default().fg(color)), Line::styled(help, dim())];
     f.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::TOP)), area);

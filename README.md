@@ -123,14 +123,84 @@ into the generated `~/.config/ghostty/ghostty-profiles-active.conf`, which is wh
 
 ### Presets
 
-`gpf install-presets` (also done on first run) installs four profiles, none with a background image:
+`gpf install-presets` (also done on first run) installs these profiles, none with a background image:
 
-- **shd** — ember orange on charcoal with glass blur and a flowing wave shader
-- **calm-dark** — quiet blue-grey, nearly opaque, soft vignette
-- **crt-green** — phosphor green with scanlines and a faint flicker
-- **aurora-glass** — translucent deep blue with a slow aurora glow
+| Profile | Look |
+| --- | --- |
+| **shd** | ember orange on charcoal with glass blur and the flowing XMB wave shader |
+| **ps3-classic** | deep blue gradient with slow white and blue XMB ribbons |
+| **dusk** | purple and pink XMB waves over deep violet |
+| **mono-waves** | grayscale XMB waves, tintable |
+| **aurora-glass** | translucent deep blue with slow aurora curtains behind the text (no blur) |
+| **enchanted-night** | glowing runes drifting up behind the text (enchanting-table inspired) |
+| **rainy-day** | chunky blue pixel rain on dark slate |
+| **matrix** | falling green glyph columns |
+| **deep-space** | drifting parallax stars (warp streaks are one slider away) |
+| **calm-dark** | quiet blue-grey, nearly opaque, a soft vignette |
+| **crt-green** | phosphor green with scanlines and a faint flicker |
 
-Shader library: `xmb-waves`, `crt-scanlines`, `aurora`, `soft-glow`. They are written to leave text legible.
+## Shaders
+
+The Shaders tab lists the shader library plus the profile's own shaders. `Enter` turns one on for the selected profile (it is
+copied into the profile folder, so exports stay self-contained), `a` toggles animation.
+
+| Shader | What it draws |
+| --- | --- |
+| `xmb-waves` | PS3-style flowing ribbons (presets: ember, ocean, forest, sakura, mono) |
+| `xmb-classic` | the original look: white/blue ribbons over a deep blue gradient (classic, midnight, daybreak) |
+| `xmb-dusk` | purple and pink waves (dusk, twilight, rose) |
+| `xmb-mono` | grayscale waves with one tint (mono, warm, cool) |
+| `xmb-aurora-ribbons` | ribbons of light hanging from the top (borealis, ice, ember) |
+| `aurora` | slow curtains of light across the top, behind the text (borealis, arctic, solar) |
+| `enchant-glyphs` | glowing runes floating up, drawn procedurally from line strokes (enchanted, emerald, ember, sparse) |
+| `pixel-rain` | blocky rain at a slight angle with splash pixels and an optional thunder flash (drizzle, rain, storm, night) |
+| `matrix-rain` | falling glyph columns with bright heads (matrix, cyber, amber, red) |
+| `starfield` | three parallax layers of stars, optional warp streaks (deep-space, hyperdrive, warm) |
+| `snow` | soft falling snow in three layers (snowfall, blizzard, ash) |
+| `fireflies` | drifting glowing dots that pulse (fireflies, lanterns, spirits) |
+| `soft-glow` | a gentle vignette; an optional text glow (off by default, because it softens text) |
+| `crt-scanlines` | scanlines, vignette and a faint flicker |
+
+All of them are original code. The effect shaders only brighten **dark background pixels**: a pixel of text, and its
+edges, comes out exactly as the terminal drew it, and none of them reads a neighbouring pixel, so none of them can blur text.
+(`crt-scanlines` and the optional text glow of `soft-glow` are the exceptions by design.)
+
+### Tuning a shader
+
+Colors and numbers of a shader are editable per profile. With the shader on, press `→` in the Shaders tab:
+
+- the **preset** row (`←→`) switches between the shader's named presets (for example `ember`, `ocean`, `forest`);
+- a **color** row: `Enter`/`p` or a click on its swatch opens the same hue wheel as the Edit tab;
+- a **number** row: `←→` nudge it (`Shift` for bigger steps), click or drag its bar, or `Enter` to type a value;
+- `R` resets the shader to its defaults, `Esc` goes back to the list.
+
+Every change is saved, the shader copy is regenerated, and Ghostty is reloaded after the usual short pause.
+
+From the shell: `gpf shader show PROFILE SHADER`, `gpf shader set PROFILE SHADER NAME VALUE`,
+`gpf shader preset PROFILE SHADER PRESET`, `gpf shader reset PROFILE SHADER`.
+
+### Writing a tunable shader
+
+A shader declares its tunable values in comments:
+
+```glsl
+// @color wave_a #ff6b1a "Wave color"
+// @float strength 0.16 0.0 0.5 "Strength"          (default, min, max)
+// @preset ocean wave_a=#2fa8ff strength=0.18
+```
+
+and uses them as `P_wave_a` (a `vec3`) and `P_strength` (a `float`). The profile keeps its values in
+`shaders/<name>.params` (plain `name = value` lines); when the profile is applied, a header of `const` declarations is
+generated at the top of the profile's copy of the shader. Names are lowercase `a-z0-9_`; presets may also use `-`.
+A malformed annotation is an error naming its line, never silently ignored.
+
+**Safety:** a `.params` file can arrive inside a shared profile. Nothing from it is ever pasted into GLSL as text: each value
+is parsed (a hex color, or a finite number inside the declared range) and the header is built from the parsed numbers, so it can
+only choose numbers. Invalid values fall back to the defaults. `export` carries the `.params` file and the rendered shader;
+`import` still strips everything but appearance settings.
+
+Copies of shaders from older releases that you never edited (`xmb-waves`, `aurora`, `soft-glow`) are upgraded to the current,
+tunable version the next time the profile is applied; a copy you changed is left alone.
 
 ### Sharing and your own images
 
@@ -176,8 +246,12 @@ To use another mechanism, set `GHOSTTY_PROFILES_RELOAD_CMD` to a shell command t
 
 ## Caveats
 
-- Ghostty shows **no error** when a custom shader fails to compile; the window just looks unchanged. The
-  bundled shaders are compile-checked in this repo's tests, but your own shaders are on you.
+- Ghostty shows **no error** when a custom shader fails to compile; the window just looks unchanged. The bundled shaders are
+  compile-checked in this repo's tests (at their defaults, every preset and extreme values), and when a GPU is available the
+  tests also **run** every shader on it over a synthetic terminal frame (Metal on a Mac, via wgpu): text pixels must come out
+  untouched, no shader may read neighbouring pixels, each must visibly draw something, and strength 0 must change nothing. That
+  is the real shader code executing, but it is not Ghostty: Ghostty's own pipeline may differ in small ways. Your own shaders
+  are on you.
 - Config location is `$XDG_CONFIG_HOME` or `~/.config`. The macOS `~/Library/Application Support`
   location is not managed.
 - The Edit tab covers the common appearance settings. Anything else can be added by hand in

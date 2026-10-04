@@ -7,5 +7,6 @@ pub mod ghostty;
 pub mod paths;
 pub mod presets;
 pub mod profile;
+pub mod shaderparams;
 pub mod store;
 pub mod tui;

@@ -17,4 +17,6 @@ ratatui = "0.30.2"
 
 [dev-dependencies]
 naga = { version = "29", features = ["glsl-in", "wgsl-out"] }
+pollster = "1.0.1"
 tempfile = "3.27.0"
+wgpu = { version = "30", default-features = false, features = ["glsl", "metal", "wgsl"] }

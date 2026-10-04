@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::confparse::{self, Line};
+use crate::shaderparams::{self, Schema};
 
 pub const CONF_NAME: &str = "profile.conf";
 pub const SHADER_KEY: &str = "custom-shader";
@@ -44,6 +45,26 @@ const APPEARANCE_EXACT: [&str; 4] = ["theme", "window-theme", "window-colorspace
 
 pub fn is_appearance_key(key: &str) -> bool {
     APPEARANCE_EXACT.contains(&key) || APPEARANCE_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// Where a shader's parameter values live: `shaders/a.glsl` -> `shaders/a.params`.
+pub fn sidecar_rel(shader_rel: &str) -> String {
+    match shader_rel.strip_suffix(".glsl") {
+        Some(stem) => format!("{stem}.params"),
+        None => format!("{shader_rel}.params"),
+    }
+}
+
+/// Largest shader or sidecar file read (a sanity limit against a shared profile with a huge file).
+const MAX_SHADER_BYTES: u64 = 1_000_000;
+
+/// A tunable shader as the TUI shows it: its declared parameters and their current values.
+#[derive(Clone, Debug)]
+pub struct ParamState {
+    pub rel: String,
+    pub schema: Schema,
+    /// One resolved (canonical) value per parameter, in schema order.
+    pub values: Vec<String>,
 }
 
 /// `#F60` / `ff6a00` / `"#FF6A00"` -> `#ff6a00`; `None` if it is not a color.
@@ -237,6 +258,122 @@ impl Profile {
         Ok(format!("{sub}/{file}"))
     }
 
+    // ---- shader parameters -----------------------------------------------------------
+    /// The profile's copy of shader `rel` (contained in the profile folder and present), if readable.
+    fn read_shader(&self, rel: &str) -> Option<(PathBuf, String)> {
+        if !is_contained_relative(rel) {
+            return None;
+        }
+        let path = self.dir.join(unquote(rel));
+        let meta = fs::metadata(&path).ok().filter(|m| m.is_file() && m.len() <= MAX_SHADER_BYTES)?;
+        let _ = meta;
+        Some((path.clone(), fs::read_to_string(path).ok()?))
+    }
+
+    fn read_sidecar(&self, rel: &str) -> std::collections::BTreeMap<String, String> {
+        let path = self.dir.join(sidecar_rel(unquote(rel)));
+        let ok = fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= 64 * 1024);
+        if !ok {
+            return Default::default();
+        }
+        shaderparams::parse_values(&fs::read_to_string(path).unwrap_or_default())
+    }
+
+    /// The tunable parameters of shader `rel` and their current values; `None` if it has none.
+    pub fn shader_param_state(&self, rel: &str) -> Option<ParamState> {
+        let (_, text) = self.read_shader(rel)?;
+        let body = shaderparams::strip_header(&text);
+        if !shaderparams::has_annotations(body) {
+            return None;
+        }
+        let schema = shaderparams::parse_schema(body).ok().filter(|s| !s.params.is_empty())?;
+        let values = shaderparams::resolve(&schema, &self.read_sidecar(rel));
+        Some(ParamState { rel: rel.to_string(), schema, values })
+    }
+
+    /// Regenerate the parameter header of every shader this profile uses from its `.params` values.
+    /// Untouched copies of shaders from older releases are first upgraded to the current library
+    /// version. Files are only rewritten when their content changes. Returns notes about shaders
+    /// whose annotations are malformed (those are left alone).
+    pub fn render_shaders(&self) -> Result<Vec<String>> {
+        let mut notes = Vec::new();
+        for rel in self.shaders() {
+            if let Some(n) = self.render_shader(&rel)? {
+                notes.push(n);
+            }
+        }
+        Ok(notes)
+    }
+
+    fn render_shader(&self, rel: &str) -> Result<Option<String>> {
+        let Some((path, text)) = self.read_shader(rel) else { return Ok(None) };
+        let file_name =
+            Path::new(unquote(rel)).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let current = crate::presets::upgrade_legacy_shader(&file_name, &text)
+            .map(str::to_string)
+            .unwrap_or_else(|| text.clone());
+        match shaderparams::render(&current, &self.read_sidecar(rel)) {
+            Ok(out) => {
+                if out != text {
+                    crate::store::atomic_write(&path, &out)?;
+                }
+                Ok(None)
+            }
+            Err(e) => Ok(Some(format!("{rel}: {e}"))),
+        }
+    }
+
+    /// Set parameter values (`(name, text)`), validating each; saves the sidecar and re-renders the shader.
+    pub fn set_shader_params(&self, rel: &str, updates: &[(String, String)]) -> Result<()> {
+        let state = self.shader_param_state(rel).with_context(|| format!("{rel} has no tunable parameters"))?;
+        let mut values = state.values.clone();
+        for (name, text) in updates {
+            let i = state
+                .schema
+                .params
+                .iter()
+                .position(|p| p.name == *name)
+                .with_context(|| format!("{rel} has no parameter '{name}'"))?;
+            values[i] = shaderparams::validate_value(&state.schema.params[i], text).map_err(anyhow::Error::msg)?;
+        }
+        crate::store::atomic_write(
+            &self.dir.join(sidecar_rel(unquote(rel))),
+            &shaderparams::format_values(&state.schema, &values),
+        )?;
+        self.render_shader(rel)?;
+        Ok(())
+    }
+
+    /// Apply a named preset of the shader's: its values over the defaults.
+    pub fn apply_shader_preset(&self, rel: &str, preset: &str) -> Result<()> {
+        let state = self.shader_param_state(rel).with_context(|| format!("{rel} has no tunable parameters"))?;
+        let p = state
+            .schema
+            .presets
+            .iter()
+            .find(|p| p.name == preset)
+            .with_context(|| format!("{rel} has no preset '{preset}'"))?;
+        let values = shaderparams::preset_values(&state.schema, p);
+        crate::store::atomic_write(
+            &self.dir.join(sidecar_rel(unquote(rel))),
+            &shaderparams::format_values(&state.schema, &values),
+        )?;
+        self.render_shader(rel)?;
+        Ok(())
+    }
+
+    /// Forget the profile's values for this shader: back to its defaults.
+    pub fn reset_shader_params(&self, rel: &str) -> Result<()> {
+        let path = self.dir.join(sidecar_rel(unquote(rel)));
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.render_shader(rel)?;
+        Ok(())
+    }
+
     pub fn set_shaders(&mut self, rel_paths: &[String]) {
         if rel_paths.is_empty() {
             self.remove(SHADER_KEY);
@@ -303,6 +440,11 @@ impl Profile {
                 if src.is_file() {
                     let rel = copy.add_asset(AssetKind::Shader, &src, None)?;
                     copy.lines.push(confparse::entry(k, &rel));
+                    // the shader's parameter values travel with it
+                    let side = src.with_extension("params");
+                    if fs::metadata(&side).is_ok_and(|m| m.is_file() && m.len() <= 64 * 1024) {
+                        fs::copy(&side, dest.join(sidecar_rel(&rel)))?;
+                    }
                 } else {
                     notes.push(format!("shader not found, left out: {v}"));
                 }

@@ -47,11 +47,43 @@ fn shaders() -> Vec<(String, String)> {
 }
 
 #[test]
-fn every_bundled_shader_compiles() {
+fn every_bundled_shader_compiles_at_defaults_presets_and_extreme_values() {
+    use ghostty_profiles::shaderparams::{self, Kind};
+    use std::collections::BTreeMap;
     let all = shaders();
-    assert!(all.len() >= 4, "{}", all.len());
-    let errors: Vec<String> = all.iter().filter_map(|(n, s)| compile(n, s).err()).collect();
+    assert!(all.len() >= 12, "{}", all.len());
+    let mut errors = Vec::new();
+    let mut compiled = 0;
+    for (name, src) in &all {
+        let schema = shaderparams::parse_schema(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut sets: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
+        for p in &schema.presets {
+            let v = shaderparams::preset_values(&schema, p);
+            sets.push(schema.params.iter().zip(v).map(|(p, v)| (p.name.clone(), v)).collect());
+        }
+        let pick = |f: &dyn Fn(&shaderparams::Param) -> String| -> BTreeMap<String, String> {
+            schema.params.iter().map(|p| (p.name.clone(), f(p))).collect()
+        };
+        sets.push(pick(&|p| if p.kind == Kind::Color { "#000000".into() } else { p.default.clone() }));
+        sets.push(pick(&|p| if p.kind == Kind::Color { "#ffffff".into() } else { p.default.clone() }));
+        sets.push(pick(&|p| match p.kind {
+            Kind::Float { min, .. } => shaderparams::format_number(min),
+            Kind::Color => p.default.clone(),
+        }));
+        sets.push(pick(&|p| match p.kind {
+            Kind::Float { max, .. } => shaderparams::format_number(max),
+            Kind::Color => p.default.clone(),
+        }));
+        for (i, values) in sets.iter().enumerate() {
+            let rendered = shaderparams::render(src, values).unwrap();
+            if let Err(e) = compile(&format!("{name} (variant {i})"), &rendered) {
+                errors.push(e);
+            }
+            compiled += 1;
+        }
+    }
     assert!(errors.is_empty(), "{}", errors.join("\n"));
+    assert!(compiled > 100, "{compiled}");
 }
 
 #[test]

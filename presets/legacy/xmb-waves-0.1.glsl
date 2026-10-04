@@ -1,17 +1,8 @@
-// PS3 XMB-style flowing waves: subtle additive ribbons over the terminal.
-// Ghostty custom shader (Shadertoy-style). The colors and numbers are tunable per profile:
-// ghostty-profiles reads the @ lines below and writes the P_* constants at the top of the
-// profile's copy of this file. Presets are named sets of values.
-//
-// @color wave_a #ff6b1a "Wave color"
-// @color wave_b #e31a24 "Accent"
-// @float strength 0.16 0.0 0.5 "Strength"
-// @float speed 0.35 0.05 1.5 "Speed"
-// @preset ember wave_a=#ff6b1a wave_b=#e31a24 strength=0.16
-// @preset ocean wave_a=#2fa8ff wave_b=#4f5bff strength=0.18
-// @preset forest wave_a=#3ddc84 wave_b=#1f8f5a strength=0.16
-// @preset sakura wave_a=#ff9ec7 wave_b=#ff5f9e strength=0.16
-// @preset mono wave_a=#ffffff wave_b=#9a9a9a strength=0.14
+// PS3 XMB-style flowing waves. Subtle additive ribbons over the terminal.
+// Tune STRENGTH (overall visibility) and SPEED. Ghostty custom shader (Shadertoy-style).
+
+const float STRENGTH = 0.16;   // 0 = invisible, ~0.3 = strong
+const float SPEED    = 0.35;   // flow speed
 
 float ribbon(vec2 p, float t, float seed, float amp, float freq) {
     float y = 0.5
@@ -27,16 +18,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
     vec4 term = texture(iChannel0, uv);
 
-    float t = iTime * P_speed;
+    float t = iTime * SPEED;
     // keep proportions sane on wide windows
     vec2 p = vec2(uv.x * (iResolution.x / iResolution.y) * 0.6, uv.y);
+
+    vec3 ember = vec3(1.00, 0.42, 0.10);   // matches cursor-color #ff6a00
+    vec3 red   = vec3(0.89, 0.10, 0.14);   // deep red, near palette 1 #e23636
 
     float w = 0.0;
     vec3 col = vec3(0.0);
     for (int i = 0; i < 5; i++) {
         float f = float(i);
         float r = ribbon(p, t + f * 0.7, f * 1.7, 0.10 + 0.015 * f, 2.2 + 0.35 * f);
-        vec3 c = mix(P_wave_a, P_wave_b, 0.5 + 0.5 * sin(f * 1.3 + t * 0.5 + p.x * 1.5));
+        vec3 c = mix(ember, red, 0.5 + 0.5 * sin(f * 1.3 + t * 0.5 + p.x * 1.5));
         col += c * r * (0.35 + 0.1 * f);
         w += r;
     }
@@ -49,5 +43,5 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float lum = dot(term.rgb, vec3(0.299, 0.587, 0.114));
     float textGuard = 1.0 - smoothstep(0.35, 0.8, lum);
 
-    fragColor = vec4(term.rgb + col * P_strength * textGuard, term.a);
+    fragColor = vec4(term.rgb + col * STRENGTH * textGuard, term.a);
 }
