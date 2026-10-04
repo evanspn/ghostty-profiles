@@ -138,6 +138,9 @@ into the generated `~/.config/ghostty/ghostty-profiles-active.conf`, which is wh
 | **deep-space** | drifting parallax stars (warp streaks are one slider away) |
 | **calm-dark** | quiet blue-grey, nearly opaque, a soft vignette |
 | **crt-green** | phosphor green with scanlines and a faint flicker |
+| **donut** | a spinning ASCII donut in phosphor green behind the text |
+| **ps4-blue** | drifting translucent low-poly facets on deep blue (PS4-era dynamic theme feel) |
+| **ps5-home** | wide soft beams of white-blue light and a few floating particles (PS5 home feel) |
 
 ## Shaders
 
@@ -162,6 +165,9 @@ copied into the profile only when you select it, and the cursor on one that is n
 | `fireflies` | a few drifting glowing dots that pulse (fireflies, lanterns, spirits) |
 | `soft-glow` | a gentle vignette on the background; an optional text glow (off by default, because it softens text) |
 | `crt-scanlines` | scanlines, vignette and a faint flicker |
+| `ansi-donut` | the classic spinning ASCII donut, drawn in the shader as a grid of characters (phosphor, amber, white, cyan, magenta, ansi-16); size, position, spin axes and character size are parameters |
+| `ps4-polygons` | slowly drifting translucent low-poly facets with a soft blue glow, two parallax layers (ps4-blue, twilight, ice) |
+| `ps5-light` | wide soft beams of white-blue light that sway slowly, floating particles, an optional iridescent tint (home, pearl, midnight) |
 
 All of them are original code. `enchant-glyphs` draws the 26 letters of the Standard Galactic Alphabet (a constructed alphabet created for the
 Commander Keen games, with one symbol per Latin letter; it is what Minecraft's enchanting table displays) from **hand-built stroke data**

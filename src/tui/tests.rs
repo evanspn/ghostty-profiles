@@ -112,7 +112,7 @@ fn text_of(buf: &Buffer) -> String {
 fn first_run_installs_the_presets_and_touches_nothing_else() {
     let h = harness();
     assert_eq!(h.app.profiles, crate::presets::profile_names());
-    assert!(h.app.profiles.len() >= 11, "{:?}", h.app.profiles);
+    assert!(h.app.profiles.len() >= 14, "{:?}", h.app.profiles);
     assert!(h.app.status.text.contains("first run"));
     assert_eq!(h.app.active, None, "nothing is applied until the user says so");
     assert!(!h.app.store.paths.active_conf().exists());

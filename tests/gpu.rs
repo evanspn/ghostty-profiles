@@ -1290,3 +1290,72 @@ fn the_glyph_strings_are_deterministic_and_actually_drawn_as_letters_not_random_
         std::fs::write(format!("{dir}/enchant-glyphs-dense.ppm"), data).unwrap();
     }
 }
+
+#[test]
+fn the_ascii_donut_is_lit_from_the_top_of_the_window_stays_in_its_box_and_spins() {
+    let g = gpu_or_skip!();
+    let (w, h) = (640u32, 360u32);
+    let bg = bg_frame(w, h);
+    let src = library().into_iter().find(|(n, _)| n == "ansi-donut.glsl").unwrap().1;
+    let big: BTreeMap<String, String> = [("pos_x", "0.5"), ("pos_y", "0.5"), ("scale", "0.8"), ("opacity", "1")]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let s = rendered(&src, &big);
+    let (mut top, mut bottom) = (0.0f32, 0.0f32);
+    let mut layers = Vec::new();
+    for t in [1.0f32, 2.5, 4.0, 5.5, 7.0] {
+        let e = effect_layer(&render_sized(&g, &s, &bg, w, h, t), &bg);
+        for y in 0..h as usize {
+            let row: f32 = e[y * w as usize..(y + 1) * w as usize].iter().sum();
+            // rows grow downward: the top of the picture is small y
+            if y < h as usize / 2 {
+                top += row;
+            } else {
+                bottom += row;
+            }
+        }
+        layers.push(e);
+    }
+    eprintln!("donut light: top half {top:.1}, bottom half {bottom:.1}");
+    assert!(top > 0.0 && top > bottom * 1.25, "the light comes from above: top {top}, bottom {bottom}");
+
+    // the donut occupies a box around its centre; nothing is drawn outside it
+    let (cx, cy, r) = (w as f32 * 0.5, h as f32 * 0.5, 0.8 * h as f32 * 0.5 * (3.2 / 3.0));
+    for e in &layers {
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                if e[y * w as usize + x] > 0.0 {
+                    let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+                    assert!((dx * dx + dy * dy).sqrt() <= r + 20.0, "a glyph at ({x},{y}) is far outside the donut");
+                }
+            }
+        }
+    }
+
+    // it spins: the picture changes between moments, and the same moment is the same picture
+    let diff = |a: &[f32], b: &[f32]| a.iter().zip(b).filter(|(p, q)| (**p - **q).abs() > 0.05).count();
+    assert!(diff(&layers[0], &layers[1]) > 500, "it must turn between 1.0s and 2.5s");
+    let again = effect_layer(&render_sized(&g, &s, &bg, w, h, 2.5), &bg);
+    assert_eq!(diff(&layers[1], &again), 0, "deterministic");
+    // spin speed 0 freezes it
+    let still: BTreeMap<String, String> =
+        big.iter().map(|(k, v)| (k.clone(), v.clone())).chain([("speed".to_string(), "0".to_string())]).collect();
+    let s0 = rendered(&src, &still);
+    let a = effect_layer(&render_sized(&g, &s0, &bg, w, h, 1.0), &bg);
+    let b = effect_layer(&render_sized(&g, &s0, &bg, w, h, 9.0), &bg);
+    assert_eq!(diff(&a, &b), 0, "speed 0 holds still");
+    // the ansi-16 preset colors the glyphs by brightness: several distinct hues appear
+    let schema = shaderparams::parse_schema(&src).unwrap();
+    let preset = schema.presets.iter().find(|p| p.name == "ansi-16").expect("an ansi-16 preset");
+    let mut vals: BTreeMap<String, String> = preset.values.iter().cloned().collect();
+    vals.extend(big);
+    let out = render_sized(&g, &rendered(&src, &vals), &bg, w, h, 3.0);
+    let mut hues = std::collections::BTreeSet::new();
+    for (o, b) in out.chunks(4).zip(bg.chunks(4)) {
+        if o[..3] != b[..3] {
+            hues.insert((o[0] / 64, o[1] / 64, o[2] / 64));
+        }
+    }
+    assert!(hues.len() >= 4, "ansi-16 uses several colors: {hues:?}");
+}
