@@ -350,6 +350,8 @@ fn draw_shaders(f: &mut Frame, area: Rect, app: &App) {
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = 0;
     let mut section = "";
+    // list item index -> shader row index (section headings are items too), for mouse clicks
+    let mut item_row: Vec<Option<usize>> = Vec::new();
     for (i, r) in app.shader_rows.iter().enumerate() {
         let want = if r.none {
             ""
@@ -360,12 +362,14 @@ fn draw_shaders(f: &mut Frame, area: Rect, app: &App) {
         };
         if want != section && !want.is_empty() {
             items.push(ListItem::new(Line::styled(format!("── {want}"), dim())));
+            item_row.push(None);
         }
         section = want;
         if i == app.shader_sel {
             selected_row = items.len();
         }
         let label = if r.none { "(none)".to_string() } else { r.name.clone() };
+        item_row.push(Some(i));
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
                 if r.enabled { "(*) " } else { "( ) " },
@@ -376,11 +380,25 @@ fn draw_shaders(f: &mut Frame, area: Rect, app: &App) {
     }
     let mut st = ListState::default().with_selected((!app.shader_rows.is_empty()).then_some(selected_row));
     let list_style = if app.param_focus { dim() } else { Style::default() };
+    let block = list_block("Shader (one per profile)");
+    let inner = block.inner(left);
     f.render_stateful_widget(
-        List::new(items).style(list_style).block(list_block("Shader (one per profile)")).highlight_style(highlight()),
+        List::new(items).style(list_style).block(block).highlight_style(highlight()),
         left,
         &mut st,
     );
+    let mut rects = app.shader_list_rects.borrow_mut();
+    rects.clear();
+    for (item, row) in item_row.iter().enumerate().skip(st.offset()) {
+        let y = inner.y + (item - st.offset()) as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        if let Some(row) = row {
+            rects.push((Rect { x: inner.x, y, width: inner.width, height: 1 }, *row));
+        }
+    }
+    drop(rects);
 
     // the profile-wide effects opacity sits above whatever else the pane shows
     let [master, rest] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(right);
@@ -558,7 +576,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             "↑↓ select · Enter edit · p color picker (or click a swatch) · ←→ cycle · x unset · ctrl+r reload · q quit"
         }
         Tab::Shaders => {
-            "↑↓ browse · Enter use this shader · → parameters · R reset · [ ] effects opacity · a animation · q quit"
+            "↑↓ browse · Enter or click: use this shader · → parameters · R reset · [ ] effects opacity · a animation · q quit"
         }
     };
     let text = vec![Line::styled(app.status.text.clone(), Style::default().fg(color)), Line::styled(help, dim())];

@@ -196,6 +196,8 @@ pub struct App {
     /// Where the parameter swatches and slider bars were drawn: (area, parameter index).
     pub param_swatches: RefCell<Vec<(Rect, usize)>>,
     pub param_bars: RefCell<Vec<(Rect, usize)>>,
+    /// Where the shader list rows were drawn: (area, index into `shader_rows`); a click selects that shader.
+    pub shader_list_rects: RefCell<Vec<(Rect, usize)>>,
     float_drag: Option<usize>,
 
     pub picker: Option<Picker>,
@@ -241,6 +243,7 @@ impl App {
             param_sel: 0,
             param_swatches: RefCell::new(Vec::new()),
             param_bars: RefCell::new(Vec::new()),
+            shader_list_rects: RefCell::new(Vec::new()),
             float_drag: None,
             picker: None,
             picker_rects: RefCell::new(PickerRects::default()),
@@ -871,8 +874,9 @@ impl App {
                     self.param_focus = true;
                 } else if self.shader_rows.get(self.shader_sel).is_some_and(|r| r.enabled && !r.none) {
                     self.say("this shader has no tunable parameters", false);
-                } else {
-                    self.say("choose the shader first (Enter), then → edits its parameters", false);
+                } else if self.shader_rows.get(self.shader_sel).is_some_and(|r| !r.enabled && !r.none) {
+                    // the arrow into the parameters of a shader that is not the profile's yet: choose it first
+                    self.select_shader();
                 }
             }
             KeyCode::Char('R') => self.reset_params(),
@@ -1209,6 +1213,16 @@ impl App {
 
     /// A click in the Shaders tab's parameter list: a swatch opens the picker, a slider sets the number.
     fn shader_press(&mut self, col: u16, row: u16) {
+        let hit = self.shader_list_rects.borrow().iter().find(|(r, _)| contains(*r, col, row)).map(|(_, i)| *i);
+        if let Some(i) = hit {
+            // a click on a radio row chooses that shader (the same as moving there and pressing Enter)
+            self.shader_sel = i;
+            self.param_sel = 0;
+            self.param_focus = false;
+            self.refresh_params(true);
+            self.select_shader();
+            return;
+        }
         let bar = *self.effects_bar.borrow();
         if let Some(bar) = bar
             && contains(bar, col, row)

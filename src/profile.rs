@@ -610,7 +610,12 @@ impl Profile {
                             .all(|(p, v)| v == p.default),
                         None => values.is_empty(),
                     };
-                    if all_default || (!is_active && drop_orphan_params) {
+                    // a parameter file whose shader is not in the profile belongs to nothing: leftover
+                    let orphan = !is_active
+                        && (!self.dir.join(format!("shaders/{stem}.glsl")).exists()
+                            || self.is_generated_shader(&format!("shaders/{stem}.glsl")))
+                        && crate::presets::shader_source(&format!("{stem}.glsl")).is_some();
+                    if all_default || orphan || (!is_active && drop_orphan_params) {
                         remove.push(e.path());
                         report.removed.push(rel);
                     } else if !is_active {

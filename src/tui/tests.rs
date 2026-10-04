@@ -340,10 +340,8 @@ fn browsing_shaders_creates_no_files_in_the_profile() {
     assert_eq!(shader_files(&h, "calm-dark"), before, "browsing wrote nothing");
     assert_eq!(h.conf("calm-dark"), conf);
     assert!(!h.app.store.profiles_dir().join("calm-dark/shaders/aurora.params").exists());
-    // moving the cursor onto the preview and pressing the parameter keys changes nothing either
-    for k in [KeyCode::Right, KeyCode::Char('R')] {
-        h.press(k);
-    }
+    // resetting parameters of a shader that is only being previewed changes nothing either
+    h.press(KeyCode::Char('R'));
     assert_eq!(shader_files(&h, "calm-dark"), before);
 }
 
@@ -1504,7 +1502,7 @@ fn the_shader_list_shows_an_enabled_shaders_parameters_with_values_and_swatches(
     h.press(KeyCode::Char('4'));
     assert!(h.app.params.is_none());
     h.press(KeyCode::Right);
-    assert!(h.app.status.text.contains("choose the shader first"));
+    assert!(h.app.status.text.contains("aurora.glsl selected"), "→ on a shader that is off selects it first");
     // a shader the user wrote has no annotations, so nothing to tune
     let dir = h.app.store.profiles_dir().join("shd/shaders");
     fs::write(
@@ -1745,4 +1743,131 @@ fn the_parameter_list_draws_at_small_sizes_without_panicking() {
     for (w, hh) in [(80, 24), (50, 16), (30, 10), (10, 5)] {
         let _ = h.screen(w, hh);
     }
+}
+
+/// Move the shader cursor to `name` with real Down/Up presses (never by setting the index).
+fn cursor_to_shader(h: &mut Harness, name: &str) {
+    let want = h.app.shader_rows.iter().position(|r| r.name == name || (name.is_empty() && r.none)).unwrap();
+    while h.app.shader_sel < want {
+        h.press(KeyCode::Down);
+    }
+    while h.app.shader_sel > want {
+        h.press(KeyCode::Up);
+    }
+}
+
+fn click(h: &mut Harness, col: u16, row: u16) {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    h.app.on_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+fn shader_line(h: &Harness, profile: &str) -> Option<String> {
+    h.conf(profile).lines().find(|l| l.starts_with("custom-shader = ")).map(str::to_string)
+}
+
+#[test]
+fn switching_shaders_with_the_real_keys_writes_conf_files_active_conf_and_one_reload() {
+    let mut h = harness();
+    h.apply("ps3-classic");
+    let dir = h.app.store.profiles_dir().join("ps3-classic");
+    // a leftover parameter file for a shader that is not in the profile (an older selection)
+    fs::write(dir.join("shaders/enchant-glyphs.params"), "opacity = 0.5\n").unwrap();
+    h.press(KeyCode::Char('4'));
+    let reloads = h.reloads.get();
+
+    // A -> B, by moving the cursor with the arrows and pressing Enter
+    cursor_to_shader(&mut h, "xmb-dusk.glsl");
+    h.press(KeyCode::Enter);
+    assert_eq!(shader_line(&h, "ps3-classic").as_deref(), Some("custom-shader = shaders/xmb-dusk.glsl"));
+    assert!(h.active_conf().contains("shaders/xmb-dusk.glsl"), "{}", h.active_conf());
+    assert!(dir.join("shaders/xmb-dusk.glsl").exists());
+    assert!(h.app.status.text.contains("xmb-dusk.glsl selected"), "{}", h.app.status.text);
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 1, "one reload");
+    assert!(h.screen(110, 30).contains("(*) xmb-dusk.glsl"));
+
+    // B -> a shader that has a stale parameter file lying around
+    cursor_to_shader(&mut h, "enchant-glyphs.glsl");
+    h.press(KeyCode::Enter);
+    assert_eq!(shader_line(&h, "ps3-classic").as_deref(), Some("custom-shader = shaders/enchant-glyphs.glsl"));
+    assert!(h.active_conf().contains("shaders/enchant-glyphs.glsl"));
+    assert!(!dir.join("shaders/xmb-dusk.glsl").exists(), "the old one's files are gone");
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 2);
+
+    // -> none, then none -> C (Space works too)
+    cursor_to_shader(&mut h, "");
+    h.press(KeyCode::Enter);
+    assert_eq!(shader_line(&h, "ps3-classic"), None);
+    assert!(!h.active_conf().contains("custom-shader ="), "{}", h.active_conf());
+    cursor_to_shader(&mut h, "snow.glsl");
+    h.press(KeyCode::Char(' '));
+    assert_eq!(shader_line(&h, "ps3-classic").as_deref(), Some("custom-shader = shaders/snow.glsl"));
+    assert!(h.active_conf().contains("shaders/snow.glsl"));
+    assert!(h.screen(110, 30).contains("(*) snow.glsl"));
+
+    // the right arrow on a shader that is not the profile's chooses it too (then → opens its parameters)
+    cursor_to_shader(&mut h, "starfield.glsl");
+    h.press(KeyCode::Right);
+    assert_eq!(shader_line(&h, "ps3-classic").as_deref(), Some("custom-shader = shaders/starfield.glsl"));
+    h.press(KeyCode::Right);
+    assert!(h.app.param_focus, "a second → enters the parameters");
+}
+
+#[test]
+fn switching_the_shader_of_a_profile_that_is_not_active_leaves_the_active_conf_alone() {
+    let mut h = harness();
+    h.apply("ps3-classic");
+    let active_before = h.active_conf();
+    let reloads = h.reloads.get();
+    h.select_profile("calm-dark");
+    h.press(KeyCode::Char('4'));
+    cursor_to_shader(&mut h, "aurora.glsl");
+    h.press(KeyCode::Enter);
+    assert_eq!(shader_line(&h, "calm-dark").as_deref(), Some("custom-shader = shaders/aurora.glsl"));
+    assert_eq!(h.active_conf(), active_before, "the live config is untouched");
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads, "no reload for a profile that is not applied");
+    assert!(h.app.status.text.contains("aurora.glsl selected") && h.app.status.text.contains("not the active"));
+}
+
+#[test]
+fn clicking_a_shader_row_selects_it_and_the_status_line_says_so() {
+    let mut h = harness();
+    h.apply("ps3-classic");
+    h.press(KeyCode::Char('4'));
+    let reloads = h.reloads.get();
+    h.screen(110, 30);
+    // draw once so the rows are laid out, then click on the row of matrix-rain
+    let rects = {
+        h.screen(110, 30);
+        h.app.shader_list_rects.borrow().clone()
+    };
+    let i = h.app.shader_rows.iter().position(|r| r.name == "matrix-rain.glsl").unwrap();
+    let (rect, _) = rects.iter().find(|(_, r)| *r == i).copied().expect("the row is clickable");
+    click(&mut h, rect.x + 3, rect.y);
+    assert_eq!(shader_line(&h, "ps3-classic").as_deref(), Some("custom-shader = shaders/matrix-rain.glsl"));
+    assert!(h.active_conf().contains("shaders/matrix-rain.glsl"));
+    assert!(h.app.status.text.contains("matrix-rain.glsl selected"), "{}", h.app.status.text);
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 1);
+    assert!(h.screen(110, 30).contains("(*) matrix-rain.glsl"));
+    // and the (none) row
+    let none = h.app.shader_list_rects.borrow().iter().find(|(_, r)| *r == 0).unwrap().0;
+    click(&mut h, none.x + 3, none.y);
+    assert_eq!(shader_line(&h, "ps3-classic"), None);
+    assert!(h.screen(110, 30).contains("(*) (none)"));
+}
+
+#[test]
+fn the_footer_names_the_keys_that_really_select() {
+    let mut h = harness();
+    h.apply("ps3-classic");
+    h.press(KeyCode::Char('4'));
+    assert!(h.screen(140, 30).contains("Enter or click: use this shader"));
 }

@@ -1004,7 +1004,7 @@ mod tests {
         let after = names(&dir);
         assert_eq!(
             after,
-            vec!["fireflies.params", "mine.glsl", "starfield.glsl", "xmb-classic.glsl", "xmb-classic.params"],
+            vec!["mine.glsl", "starfield.glsl", "xmb-classic.glsl", "xmb-classic.params"],
             "the active shader and its changed values, plus what the user wrote or changed: {after:?}"
         );
         assert_eq!(
@@ -1017,10 +1017,10 @@ mod tests {
                 && r.kept_user.contains(&"shaders/starfield.glsl".to_string()),
             "{r:?}"
         );
-        assert_eq!(
-            r.kept_params,
-            vec!["shaders/fireflies.params"],
-            "changed values for a shader that is not in use are kept, and reported"
+        assert!(r.kept_params.is_empty(), "{r:?}");
+        assert!(
+            r.removed.contains(&"shaders/fireflies.params".to_string()),
+            "a parameter file whose shader is not in the profile is a leftover and goes (after the backup): {r:?}"
         );
         let backup = r.backup.clone().expect("backed up before the first deletion");
         assert!(backup.starts_with(s.paths.app_dir().join("backups")), "outside the profiles folder: {backup:?}");
@@ -1037,9 +1037,7 @@ mod tests {
         let again = s.prune_profile("ps3", false, false).unwrap();
         assert!(again.is_empty() && again.backup.is_none(), "{again:?}");
         assert_eq!(names(&dir), after);
-        // orphaned changed values go only when asked
-        let r = s.prune_profile("ps3", false, true).unwrap();
-        assert_eq!(r.removed, vec!["shaders/fireflies.params"]);
+        assert!(backup.join("shaders/fireflies.params").is_file(), "the leftover is recoverable from the backup");
     }
 
     #[test]
