@@ -141,6 +141,7 @@ into the generated `~/.config/ghostty/ghostty-profiles-active.conf`, which is wh
 | **donut** | a spinning ASCII donut in phosphor green behind the text |
 | **ps4-blue** | drifting translucent low-poly facets on deep blue (PS4-era dynamic theme feel) |
 | **ps5-home** | wide soft beams of white-blue light and a few floating particles (PS5 home feel) |
+| **ps3-clock** | the time of day told only with light: hour, minute and second orbs over slow XMB waves (needs zsh, see below) |
 
 ## Shaders
 
@@ -260,6 +261,23 @@ profile's shader, and parameter files holding only defaults. **Anything you wrot
 those too). A profile folder is **backed up once**, before the first deletion, to `~/.config/ghostty-profiles/backups/NAME.bak-pre-prune`.
 A profile that lists several `custom-shader` lines keeps the first and says so.
 
+### The clock (ps3-clock)
+
+Ghostty gives custom shaders no wall-clock time: `iDate` is always zero, and `iTime` counts from each window's own first frame
+(every window, tab and split has its own). What a shader does get is the terminal's live 256-color palette. So while a clock look
+is active, each zsh shell in Ghostty keeps color **254** of its own terminal set to the current time, once a second, with an
+invisible escape (`OSC 4`; red = 200 + hour, green = 192 + minute, blue = 192 + second), and the clock shader reads it back. Every
+window, tab and split shows the right time, to the second, with no reload.
+
+- **Starting it:** `gpf apply ps3-clock`. The first time, this adds one marked line to `~/.zshrc` (backed up first) that sources
+  `~/.config/ghostty-profiles/clock.zsh`. Open a new tab afterwards, or run `source ~/.zshrc` in the ones already open.
+- **Stopping it:** apply any other look, or `gpf off`. Each shell's loop notices within a second, gives color 254 back, and exits.
+  The loops also exit by themselves when their shell does, so none are left behind. `gpf_clock_stop` stops the one in the current shell.
+- **Removing it:** `gpf unlink` removes the line from `~/.zshrc` and the script, along with the Ghostty include line.
+- **Costs:** one small background loop per Ghostty shell (zsh builtins only, no new process each second). Color 254 (a light grey)
+  shifts slightly while the clock runs, so a program that draws in exactly that color sees it tinted. Shells other than zsh,
+  and shells inside tmux, are not stamped; there the face shows no hands rather than a wrong time.
+
 ### Writing a tunable shader
 
 A shader declares its tunable values in comments:
@@ -275,7 +293,9 @@ A shader declares its tunable values in comments:
 and uses them as `P_opacity`, `P_wave_a` (a `vec3`) and `P_strength` (a `float`). The profile keeps its values in
 `shaders/<name>.params` (plain `name = value` lines); when the profile is applied, a header of `const` declarations (plus `P_bg`, `gp_textMask`,
 `gp_yup`) is generated at the top of the profile's copy of the shader. Names are lowercase `a-z0-9_`; presets may also use `-`.
-`// @coverage full` exempts a shader that is meant to span the screen from the coverage budget. A malformed annotation is an error
+`// @coverage full` exempts a shader that is meant to span the screen from the coverage budget. A shader that calls `gp_clockStamp()`
+(inside `#ifdef GP_HAS_CLOCK`) uses the palette clock (see [The clock](#the-clock-ps3-clock)): in Ghostty the header then defines both;
+it returns hour, minute, second, and 1 when a stamp is present. A malformed annotation is an error
 naming its line, never silently ignored.
 
 **Safety:** a `.params` file can arrive inside a shared profile. Nothing from it is ever pasted into GLSL as text: each value

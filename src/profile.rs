@@ -319,7 +319,18 @@ impl Profile {
             opacity_scale: self.effects_opacity(),
             background: background.as_deref().and_then(hex_rgb).unwrap_or(shaderparams::DEFAULT_BACKGROUND),
             background_image: self.image().is_some_and(|v| !unquote(&v).is_empty()),
+            // what is rendered here is the shader Ghostty runs
+            ghostty_uniforms: true,
         }
+    }
+
+    /// Does one of the profile's shaders tell the time from the palette clock (`// @clock palette`)?
+    pub fn uses_palette_clock(&self) -> bool {
+        self.shaders().iter().any(|rel| {
+            self.read_shader(rel).is_some_and(|(_, text)| {
+                shaderparams::parse_schema(shaderparams::strip_header(&text)).is_ok_and(|s| s.palette_clock)
+            })
+        })
     }
 
     /// The profile's master effects opacity, 0..1 (1 when unset or invalid).

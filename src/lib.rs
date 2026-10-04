@@ -2,6 +2,7 @@
 //! profiles (colors, fonts, shaders, background) with hot reload.
 
 pub mod cli;
+pub mod clock;
 pub mod confparse;
 pub mod ghostty;
 pub mod paths;

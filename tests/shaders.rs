@@ -95,3 +95,27 @@ fn the_checker_itself_catches_a_broken_shader() {
             .is_ok()
     );
 }
+
+/// The palette clock: rendered for Ghostty, the clock shader's header reads `iPalette` (which Ghostty provides) and must
+/// compile with it; rendered for previews and tests (no `iPalette` there), the header leaves the palette out entirely.
+#[test]
+fn the_clock_shader_reads_the_palette_only_when_rendered_for_ghostty() {
+    use ghostty_profiles::shaderparams::{self, RenderContext};
+    use std::collections::BTreeMap;
+    let src = shaders().into_iter().find(|(n, _)| n == "ps3-clock.glsl").expect("ps3-clock.glsl").1;
+    assert!(shaderparams::parse_schema(&src).unwrap().palette_clock, "the clock calls gp_clockStamp()");
+    let for_ghostty = RenderContext { ghostty_uniforms: true, ..RenderContext::default() };
+    let ghostty = shaderparams::render_ctx(&src, &BTreeMap::new(), &for_ghostty).unwrap();
+    assert!(ghostty.contains("#define GP_HAS_CLOCK") && ghostty.contains("iPalette[254]"));
+    // Ghostty's own prefix declares the palette next to the Shadertoy uniforms
+    let with_palette = PREFIX.replace("    vec4 iDate;\n", "    vec4 iDate;\n    vec3 iPalette[256];\n");
+    let full = format!("{with_palette}{ghostty}{SUFFIX}");
+    let module = Frontend::default().parse(&Options::from(ShaderStage::Fragment), &full).expect("parses with iPalette");
+    Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).expect("validates with iPalette");
+    let preview = shaderparams::render_ctx(&src, &BTreeMap::new(), &RenderContext::default()).unwrap();
+    assert!(!preview.contains("#define GP_HAS_CLOCK") && !preview.contains("iPalette[254]"));
+    compile("ps3-clock.glsl (preview)", &preview).unwrap();
+    // another shader rendered for Ghostty gets no clock code
+    let waves = shaders().into_iter().find(|(n, _)| n == "xmb-waves.glsl").unwrap().1;
+    assert!(!shaderparams::render_ctx(&waves, &BTreeMap::new(), &for_ghostty).unwrap().contains("iPalette[254]"));
+}
