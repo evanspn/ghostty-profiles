@@ -55,7 +55,22 @@ settings show immediately. Applying a profile again turns it back on. `(none)` i
 
 Keys: `Tab`/`Shift-Tab` or `1`-`4` switch tabs, `↑↓` move, `u` off (no profile), `n` new profile (a copy of the selected
 one), `r` rename, `d` delete (asks for `y`), `e` export, `p` install presets, `ctrl+r` force reload, `q` quit.
-In Edit: `Enter` edits (or cycles a choice), `←→` cycle choices, `x` unsets the value.
+In Edit: `Enter` edits (or cycles a choice), `←→` cycle choices, `x` unsets the value, `p` opens the color picker.
+
+### The color picker
+
+On any color field (background, foreground, cursor, selection, the 16 ANSI colors) press `p`, or **click the field's swatch**,
+to open a picker: a hue/saturation **wheel** drawn as a real circle (half-block characters, so it is round), a **brightness**
+bar, a live preview of the color, and the hex in the input box below.
+
+- **Mouse** (the TUI turns mouse reporting on while it runs and gives it back on exit): click or drag on the wheel to pick hue
+  and saturation, click or drag the bar for brightness. The hex updates live. A click outside the circle is ignored; dragging
+  past the rim sticks to the rim. Nothing is saved or reloaded while you drag: `Enter` accepts (autosave, re-render and the
+  usual debounced hot reload), `Esc` cancels and keeps the old value.
+- **Keyboard**: `←→` change hue, `↑↓` saturation, `[` `]` (or `-` `+`) brightness; hold `Shift` (or use `{` `}`) for bigger steps.
+  Typing a hex in the box moves the crosshair to match.
+- **Small or plain terminals**: on a short terminal the wheel shrinks and then gives way to three sliders (H, S, V); on a
+  terminal without 24-bit color (`COLORTERM` is not `truecolor`) the picker and swatches use the nearest of the 256 colors.
 
 Every valid edit is **autosaved** to the profile, the active config is re-rendered, and Ghostty
 is reloaded after a short (250 ms) pause so a burst of edits causes one reload. Invalid values

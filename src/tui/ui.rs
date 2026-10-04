@@ -6,7 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
-use super::app::{App, Tab, Top, WizardStep};
+use super::app::{App, Comp, Tab, Top, WizardStep};
+use super::color::{self, Hsv, WheelGeom};
 use super::fields::Kind;
 use crate::ghostty::{ThemeColors, theme_colors};
 use crate::profile::{Profile, hex_rgb};
@@ -14,7 +15,7 @@ use crate::profile::{Profile, hex_rgb};
 const ACCENT: Color = Color::Yellow;
 
 fn rgb(hex: &str) -> Option<Color> {
-    hex_rgb(hex).map(|(r, g, b)| Color::Rgb(r, g, b))
+    hex_rgb(hex).map(|(r, g, b)| color::term_color(r, g, b))
 }
 
 fn dim() -> Style {
@@ -128,6 +129,9 @@ fn preview(f: &mut Frame, area: Rect, title: &str, c: &Colors, extra: Vec<Line<'
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    color::set_truecolor(app.truecolor);
+    *app.picker_rects.borrow_mut() = Default::default();
+    app.swatch_rects.borrow_mut().clear();
     let [tabs, body, footer] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)]).areas(f.area());
 
@@ -152,6 +156,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.wizard.is_some() {
         draw_wizard(f, app);
     } else if app.input.is_some() {
+        if app.picker.is_some() {
+            draw_picker(f, app);
+        }
         draw_input(f, app);
     }
 }
@@ -275,6 +282,7 @@ fn draw_edit(f: &mut Frame, area: Rect, app: &App) {
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = 0;
     let mut group = "";
+    let mut swatches: Vec<(usize, usize, usize)> = Vec::new(); // (field, item row, value width)
     for (i, fld) in app.fields.iter().enumerate() {
         if fld.group != group {
             group = fld.group;
@@ -292,21 +300,36 @@ fn draw_edit(f: &mut Frame, area: Rect, app: &App) {
         if matches!(fld.kind, Kind::Hex | Kind::Palette(_)) {
             spans.push(Span::raw(" "));
             spans.push(swatch(value.as_deref()));
+            swatches.push((i, items.len(), value.as_ref().map(|v| v.chars().count()).unwrap_or(1)));
         }
         items.push(ListItem::new(Line::from(spans)));
     }
     let name = app.profile.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "no profile".into());
+    let block = list_block(&format!("Edit '{name}'"));
+    let inner = block.inner(left);
     let mut st = ListState::default().with_selected(Some(selected_row));
-    f.render_stateful_widget(
-        List::new(items).block(list_block(&format!("Edit '{name}'"))).highlight_style(highlight()),
-        left,
-        &mut st,
-    );
+    f.render_stateful_widget(List::new(items).block(block).highlight_style(highlight()), left, &mut st);
+
+    // the color swatches (and the hex beside them) are clickable: they open the picker
+    let offset = st.offset();
+    let mut rects = app.swatch_rects.borrow_mut();
+    for (field, item, vw) in swatches {
+        if item >= offset && item - offset < inner.height as usize {
+            let (x, w) = (inner.x + 18, (vw + 3) as u16);
+            if x < inner.x + inner.width {
+                rects.push((
+                    Rect { x, y: inner.y + (item - offset) as u16, width: w.min(inner.x + inner.width - x), height: 1 },
+                    field,
+                ));
+            }
+        }
+    }
+    drop(rects);
 
     match &app.profile {
         Some(p) => {
             let extra = vec![
-                Line::styled("Enter edits · ←/→ cycles choices · x unsets · every change saves and reloads", dim()),
+                Line::styled("Enter edits · p or click a swatch: color picker · ←/→ cycles choices · x unsets", dim()),
                 Line::raw(""),
             ];
             preview(f, right, "Live preview", &Colors::from_profile(p), extra);
@@ -360,7 +383,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             "Enter apply · n new profile · r rename · d delete · e export · u off · p presets · ctrl+r reload · q quit"
         }
         Tab::Themes => "↑↓ select · / filter · Enter bake into profile · Esc clear · Tab next · q quit",
-        Tab::Edit => "↑↓ select · Enter edit · ←→ cycle · x unset · Tab next · ctrl+r reload · q quit",
+        Tab::Edit => {
+            "↑↓ select · Enter edit · p color picker (or click a swatch) · ←→ cycle · x unset · ctrl+r reload · q quit"
+        }
         Tab::Shaders => "↑↓ select · Enter toggle · a animation · Tab next · q quit",
     };
     let text = vec![Line::styled(app.status.text.clone(), Style::default().fg(color)), Line::styled(help, dim())];
@@ -462,4 +487,175 @@ fn draw_wizard(f: &mut Frame, app: &App) {
             .block(Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT))),
         r,
     );
+}
+
+// ---- the color picker ------------------------------------------------------------------
+
+fn hsv_color(h: f32, s: f32, v: f32) -> Color {
+    let (r, g, b) = color::hsv_to_rgb(Hsv { h, s, v });
+    color::term_color(r, g, b)
+}
+
+fn luminance(h: f32, s: f32, v: f32) -> f32 {
+    let (r, g, b) = color::hsv_to_rgb(Hsv { h, s, v });
+    (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0
+}
+
+/// A horizontal bar of `width` cells (`height` rows) whose color at fraction t is `at(t)`, with a marker
+/// at `marker`.
+fn draw_bar(f: &mut Frame, r: Rect, marker: f32, at: impl Fn(f32) -> (Color, f32)) {
+    let mark_col = color::bar_cell(marker, r.width);
+    for dx in 0..r.width {
+        let (c, lum) = at(color::bar_fraction(dx as i32, r.width));
+        for dy in 0..r.height {
+            let cell = &mut f.buffer_mut()[(r.x + dx, r.y + dy)];
+            cell.set_char(if dx == mark_col { '┃' } else { ' ' }).set_bg(c).set_fg(if lum > 0.5 {
+                Color::Black
+            } else {
+                Color::White
+            });
+        }
+    }
+}
+
+fn draw_picker(f: &mut Frame, app: &App) {
+    let (Some(picker), Some(input)) = (&app.picker, &app.input) else { return };
+    let hsv = picker.hsv;
+    // keep clear of the input box, which is drawn at the bottom
+    let full = f.area();
+    let area = Rect { height: full.height.saturating_sub(6), ..full };
+    if area.width < 12 || area.height < 4 {
+        return;
+    }
+    let width = area.width.saturating_sub(2).min(64);
+    let height = area.height.saturating_sub(1).min(21);
+    let r = Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height };
+    f.render_widget(Clear, r);
+    let block =
+        Block::default().borders(Borders::ALL).title(" Color picker ").border_style(Style::default().fg(ACCENT));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    let hex = color::hsv_to_hex(hsv);
+    let (cr, cg, cb) = color::hsv_to_rgb(hsv);
+    let current = color::term_color(cr, cg, cb);
+
+    // wheel mode needs the wheel (2:1 cells), a gap, a 12-wide side panel, and 4 rows under the wheel
+    let wheel_h = inner.height.saturating_sub(4).min(14).min(inner.width.saturating_sub(15) / 2);
+    if wheel_h >= 5 {
+        let wheel = Rect { x: inner.x, y: inner.y, width: wheel_h * 2, height: wheel_h };
+        let geom = WheelGeom { cols: wheel.width, rows: wheel.height };
+        for row in 0..wheel.height {
+            for col in 0..wheel.width {
+                let (x, y) = (col as f32 + 0.5, row as f32 * 2.0);
+                let top = geom.pixel_hs(x, y + 0.5).map(|(h, s)| hsv_color(h, s, 1.0));
+                let bottom = geom.pixel_hs(x, y + 1.5).map(|(h, s)| hsv_color(h, s, 1.0));
+                let cell = &mut f.buffer_mut()[(wheel.x + col, wheel.y + row)];
+                match (top, bottom) {
+                    (Some(t), Some(b)) => {
+                        cell.set_char('▀').set_fg(t).set_bg(b);
+                    }
+                    (Some(t), None) => {
+                        cell.set_char('▀').set_fg(t);
+                    }
+                    (None, Some(b)) => {
+                        cell.set_char('▄').set_fg(b);
+                    }
+                    (None, None) => {}
+                }
+            }
+        }
+        // the crosshair at the current hue/saturation
+        let (_, _, mc, mr) = geom.marker(hsv.h, hsv.s);
+        let under = hsv_color(hsv.h, hsv.s, 1.0);
+        let ink = if luminance(hsv.h, hsv.s, 1.0) > 0.5 { Color::Black } else { Color::White };
+        f.buffer_mut()[(wheel.x + mc, wheel.y + mr)]
+            .set_char('+')
+            .set_fg(ink)
+            .set_bg(under)
+            .set_style(Style::default().add_modifier(Modifier::BOLD));
+
+        // brightness bar under the wheel
+        let label = Rect { x: inner.x, y: wheel.y + wheel.height, width: wheel.width, height: 1 };
+        f.render_widget(
+            Paragraph::new(Line::styled(format!("brightness {:>3}%", (hsv.v * 100.0).round() as u32), dim())),
+            label,
+        );
+        let bar = Rect {
+            x: inner.x,
+            y: label.y + 1,
+            width: wheel.width,
+            height: 2.min(inner.height.saturating_sub(wheel.height + 1)),
+        };
+        draw_bar(f, bar, hsv.v, |t| (hsv_color(hsv.h, hsv.s, t), luminance(hsv.h, hsv.s, t)));
+        *app.picker_rects.borrow_mut() = super::app::PickerRects { wheel: Some(wheel), bars: vec![(Comp::Val, bar)] };
+
+        // side panel: live preview, the hex and the keys
+        let px = wheel.x + wheel.width + 2;
+        let pw = (inner.x + inner.width).saturating_sub(px);
+        if pw >= 10 {
+            let sw = Rect { x: px, y: inner.y, width: pw.min(14), height: 3.min(inner.height) };
+            for dy in 0..sw.height {
+                for dx in 0..sw.width {
+                    f.buffer_mut()[(sw.x + dx, sw.y + dy)].set_char(' ').set_bg(current);
+                }
+            }
+            let text = vec![
+                Line::from(vec![Span::styled(hex.clone(), Style::default().add_modifier(Modifier::BOLD))]),
+                Line::styled(
+                    format!("H {:>3}°  S {:>3}%", hsv.h.round() as u32 % 360, (hsv.s * 100.0).round() as u32),
+                    dim(),
+                ),
+                Line::raw(""),
+                Line::styled("click or drag the wheel", dim()),
+                Line::styled("and the brightness bar", dim()),
+                Line::raw(""),
+                Line::styled("arrows: hue / saturation", dim()),
+                Line::styled("[ ]  + -: brightness", dim()),
+                Line::styled("Shift: bigger steps", dim()),
+                Line::raw(""),
+                Line::styled("Enter accept · Esc cancel", dim()),
+            ];
+            let tr =
+                Rect { x: px, y: sw.y + sw.height + 1, width: pw, height: inner.height.saturating_sub(sw.height + 1) };
+            f.render_widget(Paragraph::new(text), tr);
+        }
+        return;
+    }
+
+    // small terminal: three sliders instead of the wheel
+    if inner.height >= 5 && inner.width >= 14 {
+        let mut bars = Vec::new();
+        let head = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  ", Style::default().bg(current)),
+                Span::styled(format!(" {hex}  "), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("Enter accept · Esc cancel", dim()),
+            ])),
+            head,
+        );
+        let rows = [(Comp::Hue, "H", hsv.h / 360.0), (Comp::Sat, "S", hsv.s), (Comp::Val, "V", hsv.v)];
+        for (i, (comp, label, frac)) in rows.into_iter().enumerate() {
+            let y = inner.y + 1 + i as u16;
+            f.render_widget(Paragraph::new(Span::styled(label, dim())), Rect { x: inner.x, y, width: 2, height: 1 });
+            let bar = Rect { x: inner.x + 2, y, width: inner.width.saturating_sub(2), height: 1 };
+            draw_bar(f, bar, frac, |t| match comp {
+                Comp::Hue => (hsv_color(t * 360.0, 1.0, 1.0), luminance(t * 360.0, 1.0, 1.0)),
+                Comp::Sat => (hsv_color(hsv.h, t, hsv.v.max(0.4)), luminance(hsv.h, t, hsv.v.max(0.4))),
+                Comp::Val => (hsv_color(hsv.h, hsv.s, t), luminance(hsv.h, hsv.s, t)),
+            });
+            bars.push((comp, bar));
+        }
+        f.render_widget(
+            Paragraph::new(Line::styled("arrows hue/sat · [ ] brightness", dim())),
+            Rect { x: inner.x, y: inner.y + 4, width: inner.width, height: 1 },
+        );
+        *app.picker_rects.borrow_mut() = super::app::PickerRects { wheel: None, bars };
+        return;
+    }
+
+    // too small for either: the hex box still works
+    f.render_widget(Paragraph::new(Line::styled(format!("{hex}  (type a hex, Esc cancels)"), dim())), inner);
+    let _ = input;
 }

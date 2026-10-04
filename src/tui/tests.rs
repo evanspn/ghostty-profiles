@@ -892,3 +892,460 @@ fn renaming_moves_the_picture_and_shaders_with_the_profile_in_the_tui() {
     assert!(dir.join("shaders/soft-glow.glsl").is_file());
     assert!(!h.app.store.profiles_dir().join("calm-dark").exists());
 }
+
+// ---- the color picker ----------------------------------------------------------------------
+
+use super::app::Comp;
+use super::color::{self, Hsv, WheelGeom};
+use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+use ratatui::style::Color;
+
+impl Harness {
+    fn buffer(&self, w: u16, h: u16) -> Buffer {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| ui::draw(f, &self.app)).unwrap();
+        t.backend().buffer().clone()
+    }
+
+    fn mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) {
+        self.app.on_mouse(MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE });
+    }
+
+    fn down(&mut self, col: u16, row: u16) {
+        self.mouse(MouseEventKind::Down(MouseButton::Left), col, row);
+    }
+
+    fn drag(&mut self, col: u16, row: u16) {
+        self.mouse(MouseEventKind::Drag(MouseButton::Left), col, row);
+    }
+
+    fn up(&mut self, col: u16, row: u16) {
+        self.mouse(MouseEventKind::Up(MouseButton::Left), col, row);
+    }
+
+    /// Apply shd, open the picker on `key` and draw it once so its areas are known.
+    fn open_picker_on(&mut self, key: &str) -> Rect {
+        self.apply("shd");
+        self.go_to_field(key);
+        self.press(KeyCode::Char('p'));
+        assert!(self.app.picker.is_some(), "the picker opened");
+        let _ = self.screen(110, 40);
+        self.app.picker_rects.borrow().wheel.expect("the wheel was drawn")
+    }
+
+    fn buf_text(&self) -> String {
+        self.app.input.as_ref().unwrap().buf.clone()
+    }
+
+    fn picker_hsv(&self) -> Hsv {
+        self.app.picker.as_ref().unwrap().hsv
+    }
+}
+
+fn geom(w: Rect) -> WheelGeom {
+    WheelGeom { cols: w.width, rows: w.height }
+}
+
+#[test]
+fn p_opens_the_picker_with_the_current_hex_and_the_marker_in_the_right_place() {
+    let mut h = harness();
+    let wheel = h.open_picker_on("cursor-color"); // shd's cursor color is #ff6a00
+    assert_eq!(h.buf_text(), "#ff6a00", "the hex is shown in the field's input box");
+    let hsv = color::hex_to_hsv("#ff6a00").unwrap();
+    assert!((h.picker_hsv().h - hsv.h).abs() < 0.01);
+    assert_eq!(wheel.width, wheel.height * 2, "a round wheel: twice as many cells wide as tall");
+
+    let buf = h.buffer(110, 40);
+    let (_, _, mc, mr) = geom(wheel).marker(hsv.h, hsv.s);
+    let cell = &buf[(wheel.x + mc, wheel.y + mr)];
+    assert_eq!(cell.symbol(), "+", "the crosshair is on the current color");
+    let (r, g, b) = color::hsv_to_rgb(Hsv { h: hsv.h, s: hsv.s, v: 1.0 });
+    assert_eq!(cell.bg, Color::Rgb(r, g, b), "and sits on the wheel color for that hue/saturation");
+    // exactly one marker
+    let crosses = (0..wheel.height)
+        .flat_map(|y| (0..wheel.width).map(move |x| (x, y)))
+        .filter(|(x, y)| buf[(wheel.x + x, wheel.y + y)].symbol() == "+")
+        .count();
+    assert_eq!(crosses, 1);
+
+    // the wheel is a real circle drawn with half blocks in truecolor; its corners are empty
+    let painted = |x: u16, y: u16| matches!(buf[(wheel.x + x, wheel.y + y)].symbol(), "▀" | "▄" | "+");
+    assert!(painted(wheel.width / 2, wheel.height / 2) && painted(wheel.width - 3, wheel.height / 2));
+    for (x, y) in [(0, 0), (wheel.width - 1, 0), (0, wheel.height - 1), (wheel.width - 1, wheel.height - 1)] {
+        assert!(!painted(x, y), "corner ({x},{y}) is outside the circle");
+    }
+    let rgb_cells = (0..wheel.height)
+        .flat_map(|y| (0..wheel.width).map(move |x| (x, y)))
+        .filter(|(x, y)| matches!(buf[(wheel.x + x, wheel.y + y)].fg, Color::Rgb(..)))
+        .count();
+    assert!(rgb_cells > 100, "truecolor cells: {rgb_cells}");
+    // brightness bar + preview + hint are on screen
+    let text = text_of(&buf);
+    assert!(text.contains("brightness") && text.contains("#ff6a00") && text.contains("Enter accept"), "{text}");
+    // the footer on the Edit tab names the picker key
+    h.press(KeyCode::Esc);
+    assert!(h.screen(140, 30).contains("p color picker"));
+}
+
+#[test]
+fn p_on_a_field_that_is_not_a_color_says_so_and_opens_nothing() {
+    let mut h = harness();
+    h.apply("shd");
+    h.go_to_field("font-size");
+    h.press(KeyCode::Char('p'));
+    assert!(h.app.picker.is_none() && h.app.input.is_none());
+    assert!(h.app.status.text.contains("color fields"));
+}
+
+#[test]
+fn clicking_the_wheel_picks_hue_and_saturation_and_updates_the_hex_live() {
+    let mut h = harness();
+    let wheel = h.open_picker_on("cursor-color");
+    let g = geom(wheel);
+    let v = h.picker_hsv().v;
+    let (col, row) = (wheel.width - 4, wheel.height / 2); // right of center: red-ish, fairly saturated
+    let (hue, sat) = g.hit(col as i32, row as i32).unwrap();
+    h.down(wheel.x + col, wheel.y + row);
+    assert_eq!(h.buf_text(), color::hsv_to_hex(Hsv { h: hue, s: sat, v }), "the input box follows the click");
+    assert!(h.app.input.is_some(), "still open: nothing is accepted by a click");
+    // the marker moved with it
+    let buf = h.buffer(110, 40);
+    let (_, _, mc, mr) = g.marker(hue, sat);
+    assert_eq!(buf[(wheel.x + mc, wheel.y + mr)].symbol(), "+");
+    // a click far left gives a different hue
+    let before = h.buf_text();
+    h.up(wheel.x + col, wheel.y + row);
+    h.down(wheel.x + 3, wheel.y + wheel.height / 2);
+    assert_ne!(h.buf_text(), before);
+    assert!((h.picker_hsv().h - 180.0).abs() < 25.0, "{}", h.picker_hsv().h);
+}
+
+#[test]
+fn dragging_follows_the_mouse_clamps_at_the_rim_and_stops_on_release() {
+    let mut h = harness();
+    let wheel = h.open_picker_on("background");
+    let (cx, cy) = (wheel.x + wheel.width / 2, wheel.y + wheel.height / 2);
+    h.down(cx + 2, cy);
+    let first = h.buf_text();
+    h.drag(cx, cy - 3);
+    let second = h.buf_text();
+    h.drag(cx - 6, cy);
+    let third = h.buf_text();
+    assert!(first != second && second != third, "{first} {second} {third}");
+    // dragging out of the circle (and out of the popup) clamps to the rim: full saturation, no jump
+    h.drag(wheel.x + wheel.width + 30, cy);
+    assert!(h.picker_hsv().s == 1.0 && (h.picker_hsv().h < 12.0 || h.picker_hsv().h > 348.0), "{:?}", h.picker_hsv());
+    h.drag(cx, wheel.y.saturating_sub(5));
+    assert!((h.picker_hsv().h - 90.0).abs() < 10.0 && h.picker_hsv().s == 1.0);
+    // release ends the drag: later motion is ignored
+    h.up(cx, cy);
+    let settled = h.buf_text();
+    h.drag(cx - 6, cy);
+    assert_eq!(h.buf_text(), settled);
+}
+
+#[test]
+fn clicks_outside_the_circle_are_ignored_and_never_jump_the_color() {
+    let mut h = harness();
+    let wheel = h.open_picker_on("cursor-color");
+    let before = (h.buf_text(), h.picker_hsv());
+    // the corners of the wheel's box, just outside the circle
+    for (x, y) in [(0, 0), (wheel.width - 1, 0), (0, wheel.height - 1), (wheel.width - 1, wheel.height - 1)] {
+        h.down(wheel.x + x, wheel.y + y);
+        assert_eq!((h.buf_text(), h.picker_hsv()), before, "corner ({x},{y})");
+        assert!(h.app.picker.as_ref().unwrap().drag.is_none(), "no drag started from outside");
+        h.drag(wheel.x + wheel.width / 2, wheel.y + wheel.height / 2);
+        assert_eq!(h.buf_text(), before.0, "a drag that began outside does nothing");
+        h.up(wheel.x + x, wheel.y + y);
+    }
+    // clicks nowhere near the picker (the title bar, the far corner)
+    for (x, y) in [(0, 0), (109, 39), (50, 1)] {
+        h.down(x, y);
+        assert_eq!(h.buf_text(), before.0);
+    }
+}
+
+#[test]
+fn the_brightness_bar_sets_value_by_click_and_drag() {
+    let mut h = harness();
+    let _ = h.open_picker_on("cursor-color");
+    let (comp, bar) = h.app.picker_rects.borrow().bars[0];
+    assert_eq!(comp, Comp::Val);
+    let hue_before = h.picker_hsv().h;
+    h.down(bar.x, bar.y);
+    assert_eq!(h.buf_text(), "#000000", "the left end is black");
+    assert!((h.picker_hsv().h - hue_before).abs() < 0.001, "hue is kept");
+    h.drag(bar.x + bar.width - 1, bar.y);
+    let full = color::hsv_to_hex(Hsv { v: 1.0, ..h.picker_hsv() });
+    assert_eq!(h.buf_text(), full, "the right end is full brightness");
+    h.drag(bar.x + bar.width / 2, bar.y + 1);
+    assert!((h.picker_hsv().v - 0.5).abs() < 0.06, "{}", h.picker_hsv().v);
+    h.drag(bar.x + bar.width + 40, bar.y);
+    assert_eq!(h.picker_hsv().v, 1.0, "past the end clamps");
+    h.drag(0, bar.y);
+    assert_eq!(h.picker_hsv().v, 0.0, "past the start clamps");
+    // brightness drags never moved the marker's hue/saturation
+    assert!((h.picker_hsv().h - hue_before).abs() < 0.001);
+}
+
+#[test]
+fn nothing_saves_or_reloads_while_dragging_only_on_accept() {
+    let mut h = harness();
+    let wheel = h.open_picker_on("cursor-color");
+    let saved = h.conf("shd");
+    let active = h.active_conf();
+    let reloads = h.reloads.get();
+    h.down(wheel.x + 3, wheel.y + 4);
+    for i in 0..30 {
+        h.drag(wheel.x + 2 + i % 9, wheel.y + 3 + i % 5);
+        h.tick();
+    }
+    h.up(wheel.x + 4, wheel.y + 4);
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads, "no hot reload for any of those drag events");
+    assert_eq!(h.conf("shd"), saved, "and nothing was written");
+    assert_eq!(h.active_conf(), active);
+    assert!(!h.app.reload_pending());
+
+    // Enter accepts: saved, re-rendered, and the normal debounced reload happens
+    let accepted = h.buf_text();
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.is_none() && h.app.picker.is_none(), "the picker closes");
+    assert!(h.conf("shd").contains(&format!("cursor-color = {accepted}")), "{accepted}");
+    assert!(h.active_conf().contains(&format!("cursor-color = {accepted}")));
+    assert!(h.app.reload_pending());
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads + 1, "exactly one reload, after accept");
+}
+
+#[test]
+fn esc_cancels_and_leaves_the_previous_value() {
+    let mut h = harness();
+    let wheel = h.open_picker_on("cursor-color");
+    let saved = h.conf("shd");
+    let reloads = h.reloads.get();
+    h.down(wheel.x + 3, wheel.y + 5);
+    assert_ne!(h.buf_text(), "#ff6a00");
+    h.press(KeyCode::Esc);
+    assert!(h.app.picker.is_none() && h.app.input.is_none());
+    assert_eq!(h.conf("shd"), saved, "the previous value is still there");
+    h.tick();
+    assert_eq!(h.reloads.get(), reloads);
+    assert_eq!(h.app.field_value(h.app.field_sel).as_deref(), Some("#ff6a00"));
+    // mouse events after closing do nothing: the wheel is gone (re-draw first, as the real loop does)
+    let _ = h.screen(110, 40);
+    assert!(h.app.picker_rects.borrow().wheel.is_none(), "no stale wheel area is left behind");
+    h.down(100, 30);
+    assert!(h.app.picker.is_none() && h.app.input.is_none());
+    let _ = wheel;
+}
+
+#[test]
+fn the_keyboard_works_without_a_mouse() {
+    let mut h = harness();
+    let _ = h.open_picker_on("cursor-color");
+    let (h0, s0, v0) = (h.picker_hsv().h, h.picker_hsv().s, h.picker_hsv().v);
+    h.press(KeyCode::Right);
+    assert!((h.picker_hsv().h - (h0 + 5.0)).abs() < 0.01);
+    h.press(KeyCode::Left);
+    h.press(KeyCode::Left);
+    assert!((h.picker_hsv().h - (h0 - 5.0)).abs() < 0.01);
+    h.app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert!((h.picker_hsv().h - (h0 + 15.0)).abs() < 0.01, "Shift makes bigger steps");
+    h.press(KeyCode::Down);
+    assert!((h.picker_hsv().s - (s0 - 0.05)).abs() < 0.001);
+    h.press(KeyCode::Up);
+    h.press(KeyCode::Up);
+    assert_eq!(h.picker_hsv().s, 1.0, "saturation stops at 1");
+    h.press(KeyCode::Char('['));
+    assert!((h.picker_hsv().v - (v0 - 0.03)).abs() < 0.001);
+    h.press(KeyCode::Char('-'));
+    h.press(KeyCode::Char(']'));
+    h.press(KeyCode::Char('+'));
+    h.press(KeyCode::Char('='));
+    assert!((h.picker_hsv().v - (v0 + 0.03).min(1.0)).abs() < 0.001);
+    h.press(KeyCode::Char('{'));
+    assert!((h.picker_hsv().v - (1.0 - 0.12)).abs() < 0.001, "{}", h.picker_hsv().v);
+    assert_eq!(h.buf_text(), color::hsv_to_hex(h.picker_hsv()), "the box always shows the color");
+    // hue wraps around
+    for _ in 0..80 {
+        h.press(KeyCode::Right);
+    }
+    assert!((0.0..360.0).contains(&h.picker_hsv().h));
+    let chosen = color::hsv_to_hex(h.picker_hsv());
+    h.press(KeyCode::Enter);
+    assert!(h.conf("shd").contains(&format!("cursor-color = {chosen}")), "accepted from the keyboard alone");
+}
+
+#[test]
+fn typing_a_hex_moves_the_marker_and_a_bad_hex_is_refused_with_the_picker_kept() {
+    let mut h = harness();
+    let wheel = h.open_picker_on("cursor-color");
+    for _ in 0..7 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("#0000ff");
+    assert!((h.picker_hsv().h - 240.0).abs() < 0.01 && h.picker_hsv().s == 1.0, "{:?}", h.picker_hsv());
+    let buf = h.buffer(110, 40);
+    let (_, _, mc, mr) = geom(wheel).marker(240.0, 1.0);
+    assert_eq!(buf[(wheel.x + mc, wheel.y + mr)].symbol(), "+", "the crosshair moved to blue");
+    // half-typed hex does not move it
+    let at = h.picker_hsv();
+    h.press(KeyCode::Backspace);
+    h.press(KeyCode::Backspace);
+    assert_eq!(h.picker_hsv(), at, "an incomplete hex leaves the marker alone");
+    h.type_text("zz");
+    h.press(KeyCode::Enter);
+    assert!(h.app.input.is_some() && h.app.picker.is_some(), "refused: both stay open");
+    assert!(h.app.input.as_ref().unwrap().error.as_deref().unwrap().contains("not a color"));
+    // fix it and accept
+    for _ in 0..8 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("#00ff00");
+    h.press(KeyCode::Enter);
+    assert!(h.conf("shd").contains("cursor-color = #00ff00"));
+    // a typed gray keeps the hue instead of snapping to red
+    h.press(KeyCode::Char('p'));
+    for _ in 0..7 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("#80808"); // (passing through valid 3-digit hexes on the way moves the marker; that is fine)
+    let hue = h.picker_hsv().h;
+    h.type_text("0");
+    assert_eq!(h.buf_text(), "#808080");
+    assert_eq!(h.picker_hsv().s, 0.0);
+    assert_eq!(h.picker_hsv().h, hue, "a typed gray keeps the hue instead of snapping to red");
+}
+
+#[test]
+fn clicking_a_color_swatch_in_the_edit_list_opens_the_picker_for_that_field() {
+    let mut h = harness();
+    h.apply("shd");
+    h.app.tab = Tab::Edit;
+    let _ = h.screen(110, 40);
+    let rects = h.app.swatch_rects.borrow().clone();
+    // 6 colors + 16 palette entries are clickable
+    assert_eq!(rects.len(), 22, "{rects:?}");
+    let cursor = h.app.fields.iter().position(|f| f.key == "cursor-color").unwrap();
+    let (r, _) = rects.iter().find(|(_, i)| *i == cursor).copied().unwrap();
+    // the swatch itself is at the right end of the hit area
+    let buf = h.buffer(110, 40);
+    assert_eq!(buf[(r.x + r.width - 1, r.y)].symbol(), "█", "the hit area ends on the swatch");
+    h.down(r.x + r.width - 1, r.y);
+    assert!(h.app.picker.is_some());
+    assert_eq!(h.app.field_sel, cursor);
+    assert_eq!(h.buf_text(), "#ff6a00");
+    h.press(KeyCode::Esc);
+
+    // a click on a non-color row or on the label does nothing
+    let font = h.app.fields.iter().position(|f| f.key == "font-size").unwrap();
+    assert!(!rects.iter().any(|(_, i)| *i == font));
+    h.down(r.x - 5, r.y);
+    assert!(h.app.picker.is_none());
+    // clicks on other tabs do nothing
+    h.app.tab = Tab::Shaders;
+    h.down(r.x + 1, r.y);
+    assert!(h.app.picker.is_none());
+}
+
+#[test]
+fn a_palette_swatch_opens_the_picker_and_accepting_writes_that_palette_entry() {
+    let mut h = harness();
+    h.apply("shd");
+    h.app.tab = Tab::Edit;
+    let _ = h.screen(110, 60);
+    let idx = h.app.fields.iter().position(|f| f.kind == super::fields::Kind::Palette(3)).unwrap();
+    let (r, _) = h.app.swatch_rects.borrow().iter().find(|(_, i)| *i == idx).copied().unwrap();
+    h.down(r.x + r.width - 1, r.y);
+    assert!(h.app.picker.is_some());
+    for _ in 0..7 {
+        h.press(KeyCode::Backspace);
+    }
+    h.type_text("#123456");
+    h.press(KeyCode::Enter);
+    assert!(h.conf("shd").contains("palette = 3=#123456"));
+}
+
+#[test]
+fn without_truecolor_the_picker_uses_the_256_color_palette() {
+    let mut h = harness();
+    h.app.truecolor = false;
+    let wheel = h.open_picker_on("cursor-color");
+    let buf = h.buffer(110, 40);
+    let mut indexed = 0;
+    for y in 0..wheel.height {
+        for x in 0..wheel.width {
+            let c = &buf[(wheel.x + x, wheel.y + y)];
+            assert!(
+                !matches!(c.fg, Color::Rgb(..)) && !matches!(c.bg, Color::Rgb(..)),
+                "no 24-bit color anywhere on the wheel"
+            );
+            if matches!(c.fg, Color::Indexed(_)) {
+                indexed += 1;
+            }
+        }
+    }
+    assert!(indexed > 100, "{indexed}");
+    // the whole screen has no 24-bit colors either, swatches included
+    assert!(buf.content().iter().all(|c| !matches!(c.fg, Color::Rgb(..)) && !matches!(c.bg, Color::Rgb(..))));
+    // and it still works
+    h.down(wheel.x + 3, wheel.y + 5);
+    assert_ne!(h.buf_text(), "#ff6a00");
+}
+
+#[test]
+fn small_terminals_shrink_the_wheel_then_fall_back_to_sliders_and_never_panic() {
+    let mut h = harness();
+    h.apply("shd");
+    h.go_to_field("cursor-color");
+    h.press(KeyCode::Char('p'));
+    for (w, hh) in [
+        (110, 40),
+        (80, 24),
+        (60, 20),
+        (50, 18),
+        (40, 16),
+        (36, 14),
+        (30, 12),
+        (24, 10),
+        (20, 8),
+        (14, 7),
+        (12, 6),
+        (10, 5),
+        (8, 4),
+        (3, 3),
+        (1, 1),
+    ] {
+        let _ = h.screen(w, hh);
+        let r = h.app.picker_rects.borrow().clone();
+        if let Some(wheel) = r.wheel {
+            assert_eq!(wheel.width, wheel.height * 2, "{w}x{hh}: still round");
+            assert!(wheel.height >= 5);
+        }
+    }
+    // a short terminal gets sliders instead of a wheel: the three components, each clickable
+    let _ = h.screen(50, 16);
+    let r = h.app.picker_rects.borrow().clone();
+    assert!(r.wheel.is_none(), "too small for a wheel");
+    assert_eq!(r.bars.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![Comp::Hue, Comp::Sat, Comp::Val]);
+    let hue_bar = r.bars[0].1;
+    h.down(hue_bar.x + hue_bar.width - 1, hue_bar.y);
+    assert!(h.picker_hsv().h > 350.0, "the right end of the hue bar is the end of the spectrum");
+    h.down(hue_bar.x, hue_bar.y);
+    assert_eq!(h.picker_hsv().h, 0.0);
+    let sat_bar = r.bars[1].1;
+    h.down(sat_bar.x, sat_bar.y);
+    assert_eq!(h.picker_hsv().s, 0.0);
+    h.drag(sat_bar.x + sat_bar.width / 2, sat_bar.y);
+    assert!((h.picker_hsv().s - 0.5).abs() < 0.1);
+    let val_bar = r.bars[2].1;
+    h.up(0, 0);
+    h.down(val_bar.x + val_bar.width - 1, val_bar.y);
+    assert_eq!(h.picker_hsv().v, 1.0);
+    assert_eq!(h.buf_text(), color::hsv_to_hex(h.picker_hsv()));
+    // the hex box still works at any size, and accepting works
+    h.press(KeyCode::Enter);
+    assert!(h.app.picker.is_none());
+}

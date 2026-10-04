@@ -6,7 +6,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::cell::RefCell;
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+
+use super::color::{self, Hsv, WheelGeom};
 
 use super::fields::{self, Field, Kind};
 use crate::ghostty::{self, Reloader, Theme};
@@ -83,6 +88,40 @@ pub struct Wizard {
     pub copy_from: Option<String>,
 }
 
+/// One of the three components of a color the picker can set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Comp {
+    Hue,
+    Sat,
+    Val,
+}
+
+/// What the mouse is dragging while the button is down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drag {
+    Wheel,
+    Bar(Comp),
+}
+
+/// The color picker: it sits beside the field's hex input box and keeps the box in step with the
+/// color while it is dragged. Nothing is saved until the input is accepted.
+#[derive(Clone, Debug)]
+pub struct Picker {
+    pub hsv: Hsv,
+    pub drag: Option<Drag>,
+}
+
+/// Where the picker was last drawn (set by the drawing code, read by the mouse handler).
+#[derive(Clone, Debug, Default)]
+pub struct PickerRects {
+    pub wheel: Option<Rect>,
+    pub bars: Vec<(Comp, Rect)>,
+}
+
+fn contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
 enum Base {
     CurrentSetup,
     Copy(String),
@@ -132,6 +171,13 @@ pub struct App {
 
     pub shader_rows: Vec<ShaderRow>,
     pub shader_sel: usize,
+
+    pub picker: Option<Picker>,
+    pub picker_rects: RefCell<PickerRects>,
+    /// Clickable color swatches in the Edit list: (area, field index). Set by the drawing code.
+    pub swatch_rects: RefCell<Vec<(Rect, usize)>>,
+    /// Draw exact colors (true) or the nearest of the 256 (false).
+    pub truecolor: bool,
 }
 
 impl App {
@@ -161,6 +207,10 @@ impl App {
             field_sel: 0,
             shader_rows: Vec::new(),
             shader_sel: 0,
+            picker: None,
+            picker_rects: RefCell::new(PickerRects::default()),
+            swatch_rects: RefCell::new(Vec::new()),
+            truecolor: true,
         };
         if app.store.list_profiles().is_empty() {
             let n = app.store.install_presets(false)?.len();
@@ -614,6 +664,7 @@ impl App {
                     });
                 }
             },
+            KeyCode::Char('p') => self.open_picker(self.field_sel),
             KeyCode::Right | KeyCode::Char('l') => self.cycle_field(true),
             KeyCode::Left | KeyCode::Char('h') => self.cycle_field(false),
             KeyCode::Char('x') | KeyCode::Delete => {
@@ -742,11 +793,166 @@ impl App {
         self.commit(if now { "animation off" } else { "animation on" });
     }
 
+    // ---- color picker ---------------------------------------------------------------
+    /// Open the picker for color field `i` (also opens its hex input box, which is where the value is accepted).
+    pub fn open_picker(&mut self, i: usize) {
+        let Some(field) = self.fields.get(i).copied() else { return };
+        if !matches!(field.kind, Kind::Hex | Kind::Palette(_)) {
+            self.say("the picker is for color fields: move to a color first", false);
+            return;
+        }
+        if self.profile.is_none() {
+            self.say("no profile selected: move off \"(none)\" on the Profiles tab to edit one", false);
+            return;
+        }
+        let hex = self
+            .field_value(i)
+            .and_then(|v| crate::profile::normalize_hex(&v))
+            .unwrap_or_else(|| "#808080".to_string());
+        let hsv = color::hex_to_hsv(&hex).unwrap_or(Hsv { h: 0.0, s: 0.0, v: 0.5 });
+        self.field_sel = i;
+        self.input = Some(Input {
+            kind: InputKind::Field(i),
+            title: format!("{} (#rrggbb): wheel, mouse or type; Enter accepts, Esc cancels", field.label),
+            buf: hex,
+            error: None,
+        });
+        self.picker = Some(Picker { hsv, drag: None });
+    }
+
+    /// The color changed in the picker: show it as hex in the input box. Nothing is saved or reloaded.
+    fn picker_set(&mut self, hsv: Hsv) {
+        let Some(p) = self.picker.as_mut() else { return };
+        p.hsv = hsv;
+        if let Some(input) = self.input.as_mut() {
+            input.buf = color::hsv_to_hex(hsv);
+            input.error = None;
+        }
+    }
+
+    /// The hex in the input box was typed or edited: move the wheel's marker to match (when it parses).
+    fn picker_follow_input(&mut self) {
+        let (Some(p), Some(input)) = (self.picker.as_mut(), self.input.as_ref()) else { return };
+        if let Some(h) = color::hsv_from_typed(&input.buf, p.hsv) {
+            p.hsv = h;
+        }
+    }
+
+    /// Keyboard fallback while the picker is open. True if the key was used.
+    fn picker_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mut hsv) = self.picker.as_ref().map(|p| p.hsv) else { return false };
+        let big = key.modifiers.contains(KeyModifiers::SHIFT);
+        let (dh, ds, dv) = if big { (20.0, 0.2, 0.12) } else { (5.0, 0.05, 0.03) };
+        match key.code {
+            KeyCode::Left => hsv.h = (hsv.h - dh).rem_euclid(360.0),
+            KeyCode::Right => hsv.h = (hsv.h + dh).rem_euclid(360.0),
+            KeyCode::Up => hsv.s = (hsv.s + ds).min(1.0),
+            KeyCode::Down => hsv.s = (hsv.s - ds).max(0.0),
+            KeyCode::Char('[') | KeyCode::Char('-') | KeyCode::Char('_') => hsv.v = (hsv.v - dv).max(0.0),
+            KeyCode::Char(']') | KeyCode::Char('+') | KeyCode::Char('=') => hsv.v = (hsv.v + dv).min(1.0),
+            KeyCode::Char('{') => hsv.v = (hsv.v - 0.12).max(0.0),
+            KeyCode::Char('}') => hsv.v = (hsv.v + 0.12).min(1.0),
+            _ => return false,
+        }
+        self.picker_set(hsv);
+        true
+    }
+
+    fn set_component(&mut self, comp: Comp, fraction: f32) {
+        let Some(mut hsv) = self.picker.as_ref().map(|p| p.hsv) else { return };
+        match comp {
+            Comp::Hue => hsv.h = (fraction * 360.0).min(359.999),
+            Comp::Sat => hsv.s = fraction,
+            Comp::Val => hsv.v = fraction,
+        }
+        self.picker_set(hsv);
+    }
+
+    /// Mouse: click or drag in the picker; click a color swatch on the Edit tab to open it.
+    pub fn on_mouse(&mut self, m: MouseEvent) {
+        let (col, row) = (m.column, m.row);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.picker.is_some() {
+                    self.picker_press(col, row);
+                } else if self.tab == Tab::Edit
+                    && self.input.is_none()
+                    && self.wizard.is_none()
+                    && self.confirm_delete.is_none()
+                {
+                    let hit = self.swatch_rects.borrow().iter().find(|(r, _)| contains(*r, col, row)).map(|(_, i)| *i);
+                    if let Some(i) = hit {
+                        self.open_picker(i);
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => self.picker_drag(col, row),
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.drag = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn picker_press(&mut self, col: u16, row: u16) {
+        let rects = self.picker_rects.borrow().clone();
+        if let Some(w) = rects.wheel.filter(|w| contains(*w, col, row)) {
+            let g = WheelGeom { cols: w.width, rows: w.height };
+            // a click outside the circle (the corners of its box) is ignored: no jump
+            if let Some((h, s)) = g.hit(col as i32 - w.x as i32, row as i32 - w.y as i32) {
+                let mut hsv = self.picker.as_ref().map(|p| p.hsv).unwrap_or(Hsv { h: 0.0, s: 0.0, v: 1.0 });
+                hsv.h = h;
+                hsv.s = s;
+                self.picker_set(hsv);
+                if let Some(p) = self.picker.as_mut() {
+                    p.drag = Some(Drag::Wheel);
+                }
+            }
+            return;
+        }
+        for (comp, r) in rects.bars {
+            if contains(r, col, row) {
+                self.set_component(comp, color::bar_fraction(col as i32 - r.x as i32, r.width));
+                if let Some(p) = self.picker.as_mut() {
+                    p.drag = Some(Drag::Bar(comp));
+                }
+                return;
+            }
+        }
+    }
+
+    fn picker_drag(&mut self, col: u16, row: u16) {
+        let Some(drag) = self.picker.as_ref().and_then(|p| p.drag) else { return };
+        let rects = self.picker_rects.borrow().clone();
+        match drag {
+            Drag::Wheel => {
+                let Some(w) = rects.wheel else { return };
+                let g = WheelGeom { cols: w.width, rows: w.height };
+                let (h, s) = g.hit_clamped(col as i32 - w.x as i32, row as i32 - w.y as i32);
+                let mut hsv = self.picker.as_ref().map(|p| p.hsv).unwrap_or(Hsv { h: 0.0, s: 0.0, v: 1.0 });
+                hsv.h = h;
+                hsv.s = s;
+                self.picker_set(hsv);
+            }
+            Drag::Bar(comp) => {
+                if let Some((_, r)) = rects.bars.iter().find(|(c, _)| *c == comp) {
+                    self.set_component(comp, color::bar_fraction(col as i32 - r.x as i32, r.width));
+                }
+            }
+        }
+    }
+
     // ---- text input -----------------------------------------------------------------
     fn on_input_key(&mut self, key: KeyEvent) {
+        if self.picker.is_some() && !key.modifiers.contains(KeyModifiers::CONTROL) && self.picker_key(key) {
+            return;
+        }
         let Some(input) = self.input.as_mut() else { return };
         match key.code {
             KeyCode::Esc => {
+                self.picker = None; // cancelling restores the previous value: nothing was saved
                 if input.kind == InputKind::Filter {
                     self.theme_filter.clear();
                     self.filter_themes();
@@ -764,11 +970,16 @@ impl App {
             }
             KeyCode::Enter => {
                 let done = self.input.take().unwrap_or_else(|| unreachable!());
+                let picker = self.picker.take();
                 self.finish_input(done);
+                if self.input.is_some() {
+                    self.picker = picker; // refused (bad hex): keep the picker open to fix it
+                }
                 return;
             }
             _ => {}
         }
+        self.picker_follow_input();
         if let Some(i) = &self.input
             && i.kind == InputKind::Filter
         {
