@@ -201,7 +201,7 @@ impl Store {
         copy_dir(src, &dest)?;
         let mut copy = Profile::load(&dest)?;
         let removed = copy.ignored_keys();
-        copy.lines.retain(|l| l.key().is_none_or(is_appearance_key));
+        copy.lines.retain(|l| l.is_allowed());
         copy.save()?;
         Ok((name, removed))
     }
@@ -629,6 +629,29 @@ mod tests {
         s.apply("theirs").unwrap();
         let active = fs::read_to_string(s.paths.active_conf()).unwrap();
         assert!(!active.contains("keybind") && !active.contains("command"), "{active}");
+    }
+
+    #[test]
+    fn control_characters_in_values_are_dropped_on_import_and_never_rendered() {
+        let sb = sandbox();
+        let s = &sb.store;
+        let shared = sb._td.path().join("cr");
+        fs::create_dir_all(&shared).unwrap();
+        // a bare carriage return inside an allowed value, with a smuggled key after it
+        fs::write(shared.join(CONF_NAME), "background = #000000\rcommand = evil\nfont-size = 12\n").unwrap();
+        let (name, removed) = s.import_profile(&shared, Some("cr")).unwrap();
+        assert_eq!(removed, vec!["background"]);
+        let on_disk = fs::read_to_string(s.profiles_dir().join(&name).join(CONF_NAME)).unwrap();
+        assert!(!on_disk.contains('\r') && !on_disk.contains("command"), "{on_disk:?}");
+        assert!(on_disk.contains("font-size = 12"));
+        // a hand-placed profile with the same trick is not rendered either
+        let dir = s.profiles_dir().join("hand");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(CONF_NAME), "foreground = #fff\rcommand = evil\ncursor-color = #123456\n").unwrap();
+        s.apply("hand").unwrap();
+        let active = fs::read_to_string(s.paths.active_conf()).unwrap();
+        assert!(!active.contains('\r') && !active.contains("command") && !active.contains("foreground"), "{active:?}");
+        assert!(active.contains("cursor-color = #123456"));
     }
 
     #[test]

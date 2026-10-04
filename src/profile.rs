@@ -72,9 +72,20 @@ fn unquote(v: &str) -> &str {
     if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') { &v[1..v.len() - 1] } else { v }
 }
 
-/// True if `rel` is a plain relative path that stays inside its folder.
+/// True if the text has a control character (a stray carriage return, escape, NUL...). Real
+/// settings never do; a shared profile that does is trying something.
+pub fn has_control_chars(v: &str) -> bool {
+    v.chars().any(|c| c.is_control() && c != '\t')
+}
+
+/// True if `rel` is a plain relative path that stays inside its folder: no absolute path, no `..`,
+/// and no `~` or `$VAR` that would point somewhere else on this machine.
 pub fn is_contained_relative(rel: &str) -> bool {
-    let p = Path::new(unquote(rel));
+    let rel = unquote(rel);
+    if rel.starts_with('~') || rel.contains('$') || has_control_chars(rel) {
+        return false;
+    }
+    let p = Path::new(rel);
     !p.as_os_str().is_empty()
         && !p.is_absolute()
         && p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
@@ -238,7 +249,7 @@ impl Profile {
     /// Keys in this profile that are not appearance settings (and so are never applied).
     pub fn ignored_keys(&self) -> Vec<String> {
         let mut v: Vec<String> =
-            self.lines.iter().filter_map(|l| l.key()).filter(|k| !is_appearance_key(k)).map(str::to_string).collect();
+            self.lines.iter().filter(|l| !l.is_allowed()).filter_map(|l| l.key()).map(str::to_string).collect();
         v.sort();
         v.dedup();
         v
@@ -254,7 +265,7 @@ impl Profile {
         );
         for l in &self.lines {
             match (l.key(), l.value()) {
-                (Some(k), _) if !is_appearance_key(k) => {}
+                (Some(_), _) if !l.is_allowed() => {}
                 (Some(k), Some(v)) if ASSET_KEYS.contains(&k) && !v.is_empty() => {
                     out.push_str(&format!("{k} = {}\n", self.resolve_asset(v).display()));
                 }
@@ -527,6 +538,9 @@ mod tests {
         assert!(!is_contained_relative("../a.glsl"));
         assert!(!is_contained_relative("shaders/../../a"));
         assert!(!is_contained_relative("/etc/passwd"));
+        for bad in ["~/x.png", "$HOME/x", "shaders/$X", "\"~/x\"", "a\rb"] {
+            assert!(!is_contained_relative(bad), "{bad:?}");
+        }
         assert!(!is_contained_relative(""));
     }
 }

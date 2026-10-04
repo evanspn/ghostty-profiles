@@ -22,6 +22,15 @@ impl Line {
         self.kv.as_ref().map(|(_, v)| v.as_str())
     }
 
+    /// True for comments and for entries that are appearance settings with clean values.
+    /// Everything else must never reach the active Ghostty config.
+    pub fn is_allowed(&self) -> bool {
+        match (self.key(), self.value()) {
+            (Some(k), Some(v)) => crate::profile::is_appearance_key(k) && !crate::profile::has_control_chars(v),
+            _ => true,
+        }
+    }
+
     pub fn is_entry(&self) -> bool {
         self.kv.is_some()
     }
