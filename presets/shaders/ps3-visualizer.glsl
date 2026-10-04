@@ -59,8 +59,9 @@ vec3 softLimit(vec3 c, float top) {
 }
 
 // ---- 1: rolling green hills with radial motion blur -----------------------------------------------------
-float hillsH(vec2 q) {
-    float h = 7.5 * vnoise(q * vec2(0.032, 0.026)) + 2.4 * vnoise(q * 0.09 + 7.0) + 0.5 * vnoise(q * 0.4);
+// lod: 0 = full detail near the camera; fewer octaves with distance (they would only shimmer there)
+float hillsH(vec2 q, float lod) {
+    float h = 7.5 * vnoise(q * vec2(0.032, 0.026)) + 2.4 * vnoise(q * 0.09 + 7.0) * (1.0 - smoothstep(150.0, 400.0, lod)) + 0.5 * vnoise(q * 0.4) * (1.0 - smoothstep(30.0, 90.0, lod));
     // a round mound every so often
     vec2 cell = vec2(floor(q.x / 60.0), floor(q.y / 90.0));
     vec2 ctr = (cell + vec2(0.4 + 0.2 * hash21(cell), 0.4 + 0.2 * hash21(cell + 4.0))) * vec2(60.0, 90.0);
@@ -72,18 +73,19 @@ float hillsH(vec2 q) {
 vec3 hills(vec2 p, float z, float t, float audio) {
     vec2 g = vec2(1.6 * sin(t * 0.13), z);
     // skim a metre or two above the highest ground just ahead, so the camera never dips into a hill
-    float ground = max(hillsH(g), max(hillsH(g + vec2(0.0, 3.0)), hillsH(g + vec2(0.0, 7.0))));
+    float ground = max(hillsH(g, 0.0), max(hillsH(g + vec2(0.0, 3.0), 0.0), hillsH(g + vec2(0.0, 7.0), 0.0)));
     vec3 ro = vec3(g.x, ground + 1.5 + 0.25 * sin(t * 0.3), z);
     float horizon = 0.17;                                   // the horizon sits in the upper third of the frame
     vec3 rd = normalize(vec3(p.x * 1.45, (p.y - horizon) * 1.45, 1.0));   // a wide field of view
     float tt = 0.4;
     bool hit = false;
-    for (int i = 0; i < 56; i++) {
+    for (int i = 0; i < 46; i++) {
         vec3 pos = ro + rd * tt;
-        float d = pos.y - hillsH(pos.xz);
+        float d = pos.y - hillsH(pos.xz, tt);
         if (d < 0.004 * tt) { hit = true; break; }
-        tt += clamp(d * 0.5 + 0.015 * tt, 0.04, 9.0);
-        if (tt > 260.0 || (rd.y > 0.0 && pos.y > 20.0)) break;
+        // steps grow with distance, so the march reaches a true horizon in few steps
+        tt += clamp(d * 0.5 + 0.02 * tt, 0.04, 40.0);
+        if (tt > 1400.0 || (rd.y > 0.0 && pos.y > 24.0)) break;
     }
     vec3 skyLow = vec3(0.30, 0.64, 0.60);
     vec3 skyHigh = vec3(0.14, 0.48, 0.55);
@@ -91,26 +93,28 @@ vec3 hills(vec2 p, float z, float t, float audio) {
     float ang = atan(p.y - horizon, p.x);
     float r = length(vec2(p.x, p.y - horizon));
     col *= 0.985 + 0.03 * vnoise(vec2(ang * 18.0, t * 0.05));
-    if (!hit && rd.y < 0.0) { hit = true; tt = 260.0; }
+    // a ray that runs out of steps below the horizon is far ground: it is fog, the colour of the sky at the horizon
+    if (!hit && rd.y < 0.0) { hit = true; tt = 1400.0; }
     if (hit) {
-        vec3 pos = ro + rd * min(tt, 260.0);
+        vec3 pos = ro + rd * min(tt, 1400.0);
         float e = 0.12 + tt * 0.02;
-        vec3 n = normalize(vec3(hillsH(pos.xz - vec2(e, 0.0)) - hillsH(pos.xz + vec2(e, 0.0)), 2.0 * e,
-                                hillsH(pos.xz - vec2(0.0, e)) - hillsH(pos.xz + vec2(0.0, e))));
+        vec3 n = normalize(vec3(hillsH(pos.xz - vec2(e, 0.0), tt) - hillsH(pos.xz + vec2(e, 0.0), tt), 2.0 * e,
+                                hillsH(pos.xz - vec2(0.0, e), tt) - hillsH(pos.xz + vec2(0.0, e), tt)));
         float diff = clamp(0.35 + 0.8 * dot(n, normalize(vec3(-0.4, 0.8, -0.3))), 0.0, 1.0);
         vec3 dark = vec3(0.04, 0.14, 0.04);
         vec3 light = vec3(0.40, 0.58, 0.17);
-        float h = hillsH(pos.xz);
+        float h = hillsH(pos.xz, tt);
         vec3 grass = mix(dark, light, clamp(diff * 0.85 + 0.2 * h / 9.0, 0.0, 1.0));
         // near-field texture that rushes past: grass tufts and drifts at three scales
-        float tex = vnoise(pos.xz * 1.6) * 0.5 + vnoise(pos.xz * 0.5 + 3.0) * 0.35 + vnoise(pos.xz * 4.0) * 0.15;
         float nearK = 1.0 - smoothstep(10.0, 70.0, tt);
+        float tex = vnoise(pos.xz * 1.6) * 0.5 + vnoise(pos.xz * 0.5 + 3.0) * 0.35 + vnoise(pos.xz * 4.0) * 0.15;
         grass *= 0.78 + 0.4 * mix(0.5, tex, nearK);
         float streak = vnoise(vec2(ang * 20.0, log(r + 0.05) * 0.9 + z * 0.02));
         grass *= 0.9 + 0.12 * streak;
         grass *= mix(1.0, 0.5, exp(-p.x * p.x * 6.0) * smoothstep(0.0, 0.14, horizon - p.y));
-        float fog = 1.0 - exp(-tt * 0.012);
-        col = mix(grass, skyLow * 0.98, fog * 0.88);
+        // atmospheric haze: by a few hundred metres the ground is the colour of the sky at the horizon, with no edge
+        float fog = 1.0 - exp(-tt * 0.0075);
+        col = mix(grass, skyLow, fog * fog * (3.0 - 2.0 * fog) * 0.55 + fog * 0.45);
     }
     col *= 1.0 + 0.12 * audio;
     return col;
@@ -140,18 +144,19 @@ vec3 valley(vec2 p, float z, float t, float audio) {
     float tt = 0.3;
     float minClear = 1e3;
     bool hit = false;
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 34; i++) {
         vec3 pos = ro + rd * tt;
         float d = pos.y - valleyH(pos.xz, 0.6);
         // only the walls make a glowing silhouette, not a ray skimming the far floor
         if (pos.y > 1.8) minClear = min(minClear, d / tt);
         if (d < 0.003 * tt) { hit = true; break; }
-        tt += clamp(d * 0.6 + 0.03 * tt, 0.02, 8.0);
-        if (tt > 160.0 || (rd.y > 0.0 && pos.y > 10.0)) break;
+        tt += clamp(d * 0.6 + 0.025 * tt, 0.02, 40.0);
+        if (tt > 900.0 || (rd.y > 0.0 && pos.y > 10.0)) break;
     }
     float skyT = clamp(rd.y * 3.0 + 0.2, 0.0, 1.0);
     vec3 col = mix(P_sky * 1.5, P_sky * 0.75, pow(skyT, 0.6));
-    float haze = 1.0 - exp(-tt * 0.022);
+    vec3 skyCol = col;
+    float haze = 1.0 - exp(-tt * 0.012);
     if (hit) {
         vec3 pos = ro + rd * tt;
         float e = 0.04 + tt * 0.01;
@@ -168,11 +173,12 @@ vec3 valley(vec2 p, float z, float t, float audio) {
         float wallH = smoothstep(1.2, 3.8, pos.y);
         lit += P_rim * P_glow * (0.9 + 0.7 * audio) * wallH * (fres * smoothstep(8.0, 40.0, tt) * 1.7 + farGlow * 0.7);
         lit += P_rim * 0.20 * smoothstep(0.6, 3.4, pos.y) * (0.3 + 0.7 * haze);
-        col = mix(lit, col, pow(haze, 2.2) * 0.35);
+        // distant walls and floor melt into the sky colour: no far edge
+        col = mix(lit, skyCol, haze * haze * (3.0 - 2.0 * haze));
     }
     // a ray that skims the far floor without landing is the dark road running to the vanishing point, not sky
     if (!hit && rd.y < 0.0) {
-        col = P_ground * 3.0 + P_rim * 0.04;
+        col = skyCol;
         hit = true;
     }
     float halo = exp(-max(minClear, 0.0) * 45.0) * (hit ? 0.0 : 1.0);
@@ -222,8 +228,8 @@ vec3 water(vec2 p, float z, float t, float audio) {
     // glints where a wave face turns toward the sun, and soft light streaks just under the surface
     col += vec3(1.0, 0.96, 0.85) * pow(max(dot(refl, sun), 0.0), 220.0) * (3.0 + 2.0 * audio);
     col += vec3(0.20, 0.55, 0.65) * pow(crest, 4.0) * 0.35 * att;
-    float fog = 1.0 - exp(-tt * 0.018);
-    return mix(col, vec3(0.80, 0.90, 0.95), fog * 0.75);
+    float fog = 1.0 - exp(-tt * 0.012);
+    return mix(col, vec3(0.80, 0.90, 0.95), fog * fog * (3.0 - 2.0 * fog));
 }
 
 // ---- 4: dark slate with long glossy streaks -----------------------------------------------------------------
