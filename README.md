@@ -141,7 +141,7 @@ into the generated `~/.config/ghostty/ghostty-profiles-active.conf`, which is wh
 | **donut** | a spinning ASCII donut in phosphor green behind the text |
 | **ps4-blue** | drifting translucent low-poly facets on deep blue (PS4-era dynamic theme feel) |
 | **ps5-home** | wide soft beams of white-blue light and a few floating particles (PS5 home feel) |
-| **ps3-clock** | the time of day told only with light: hour, minute and second orbs over slow XMB waves (needs zsh, see below) |
+| **ps3-clock** | the time of day told only with soft moonlight: hour, minute and second moons with slow sparkles over cool XMB waves (needs zsh, see below) |
 
 ## Shaders
 
