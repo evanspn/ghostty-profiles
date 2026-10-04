@@ -61,32 +61,43 @@ vec3 softLimit(vec3 c, float top) {
 // ---- 1: rolling green hills with radial motion blur -----------------------------------------------------
 // lod: 0 = full detail near the camera; fewer octaves with distance (they would only shimmer there)
 float hillsH(vec2 q, float lod) {
-    float h = 7.5 * vnoise(q * vec2(0.032, 0.026)) + 2.4 * vnoise(q * 0.09 + 7.0) * (1.0 - smoothstep(150.0, 400.0, lod)) + 0.5 * vnoise(q * 0.4) * (1.0 - smoothstep(30.0, 90.0, lod));
+    float h = 3.8 * vnoise(q * vec2(0.020, 0.016)) + 1.9 * vnoise(q * 0.09 + 7.0) * (1.0 - smoothstep(150.0, 400.0, lod)) + 0.5 * vnoise(q * 0.4) * (1.0 - smoothstep(30.0, 90.0, lod));
     // a round mound every so often
     vec2 cell = vec2(floor(q.x / 60.0), floor(q.y / 90.0));
     vec2 ctr = (cell + vec2(0.4 + 0.2 * hash21(cell), 0.4 + 0.2 * hash21(cell + 4.0))) * vec2(60.0, 90.0);
     float d = length((q - ctr) * vec2(1.0, 0.7));
-    h += 9.0 * hash21(cell + 9.0) * exp(-d * d / 110.0);
+    // compact support (exactly zero 22 units out, inside the cell): the ground has no step at the cell borders
+    float mw = max(0.0, 1.0 - d * d / 484.0);
+    h += 4.0 * hash21(cell + 9.0) * mw * mw;
     return h;
 }
 
 vec3 hills(vec2 p, float z, float t, float audio) {
     vec2 g = vec2(1.6 * sin(t * 0.13), z);
-    // skim a metre or two above the highest ground just ahead, so the camera never dips into a hill
-    float ground = max(hillsH(g, 0.0), max(hillsH(g + vec2(0.0, 3.0), 0.0), hillsH(g + vec2(0.0, 7.0), 0.0)));
-    vec3 ro = vec3(g.x, ground + 1.5 + 0.25 * sin(t * 0.3), z);
+    // The camera height is a smooth function of position: the average of the broad terrain over a long stretch around the camera (the
+    // rolling land carries it up and down gently), never a raw sample of the ground (a bump would make the whole view jump).
+    float avg = 0.0;
+    for (int i = 0; i < 5; i++) avg += hillsH(g + vec2(0.0, -12.0 + 12.0 * float(i)), 1e4) * 0.2;
+    // and never closer to the ground just ahead than a metre: a smooth maximum, so there is no kink either
+    float here = hillsH(g + vec2(0.0, 2.0), 1e4) + 1.2;
+    float base = avg + 2.6;
+    float camY = 0.5 * (base + here + sqrt((base - here) * (base - here) + 1.5)) + 0.25 * sin(t * 0.3);
+    vec3 ro = vec3(g.x, camY, z);
     float horizon = 0.17;                                   // the horizon sits in the upper third of the frame
     vec3 rd = normalize(vec3(p.x * 1.45, (p.y - horizon) * 1.45, 1.0));   // a wide field of view
     float tt = 0.4;
     bool hit = false;
-    for (int i = 0; i < 46; i++) {
+    bool open = false;
+    for (int i = 0; i < 48; i++) {
         vec3 pos = ro + rd * tt;
         float d = pos.y - hillsH(pos.xz, tt);
         if (d < 0.004 * tt) { hit = true; break; }
         // steps grow with distance, so the march reaches a true horizon in few steps
-        tt += clamp(d * 0.5 + 0.02 * tt, 0.04, 40.0);
-        if (tt > 1400.0 || (rd.y > 0.0 && pos.y > 24.0)) break;
+        tt += clamp(d * 0.6 + 0.045 * tt, 0.05, 40.0);
+        if (tt > 260.0 || (rd.y > 0.0 && pos.y > 24.0)) { open = true; break; }
     }
+    // a ray that used up its steps without leaving the terrain is far ground too (hazed like the rest), never a slit of sky
+    if (!hit && !open) hit = true;
     vec3 skyLow = vec3(0.30, 0.64, 0.60);
     vec3 skyHigh = vec3(0.14, 0.48, 0.55);
     vec3 col = mix(skyLow, skyHigh, clamp((p.y - horizon) * 2.2, 0.0, 1.0));
@@ -94,9 +105,9 @@ vec3 hills(vec2 p, float z, float t, float audio) {
     float r = length(vec2(p.x, p.y - horizon));
     col *= 0.985 + 0.03 * vnoise(vec2(ang * 18.0, t * 0.05));
     // a ray that runs out of steps below the horizon is far ground: it is fog, the colour of the sky at the horizon
-    if (!hit && rd.y < 0.0) { hit = true; tt = 1400.0; }
+    if (!hit && rd.y < 0.0) { hit = true; tt = 260.0; }
     if (hit) {
-        vec3 pos = ro + rd * min(tt, 1400.0);
+        vec3 pos = ro + rd * min(tt, 260.0);
         float e = 0.12 + tt * 0.02;
         vec3 n = normalize(vec3(hillsH(pos.xz - vec2(e, 0.0), tt) - hillsH(pos.xz + vec2(e, 0.0), tt), 2.0 * e,
                                 hillsH(pos.xz - vec2(0.0, e), tt) - hillsH(pos.xz + vec2(0.0, e), tt)));
@@ -113,7 +124,8 @@ vec3 hills(vec2 p, float z, float t, float audio) {
         grass *= 0.9 + 0.12 * streak;
         grass *= mix(1.0, 0.5, exp(-p.x * p.x * 6.0) * smoothstep(0.0, 0.14, horizon - p.y));
         // atmospheric haze: by a few hundred metres the ground is the colour of the sky at the horizon, with no edge
-        float fog = 1.0 - exp(-tt * 0.017);
+        // (a power law: clear near the camera, hazy by 60 m, gone by 150 m; the far crests the march cannot resolve are already sky)
+        float fog = 1.0 - exp(-pow(tt / 65.0, 1.7));
         col = mix(grass, skyLow, fog);
     }
     col *= 1.0 + 0.12 * audio;
@@ -159,7 +171,7 @@ vec3 valley(vec2 p, float z, float t, float audio) {
     vec3 col = mix(P_sky * 1.0, P_sky * 0.7, smoothstep(0.0, 0.5, rd.y));
     // distance haze fades to the sky colour AT the horizon, which is also the colour of the sky just above it
     vec3 skyCol = P_sky * 1.0;
-    float haze = 1.0 - exp(-tt * 0.02);
+    float haze = 1.0 - exp(-tt * 0.025);
     if (hit) {
         vec3 pos = ro + rd * tt;
         float e = 0.04 + tt * 0.01;
@@ -179,20 +191,39 @@ vec3 valley(vec2 p, float z, float t, float audio) {
         // distant walls and floor melt into the sky colour: no far edge
         col = mix(lit, skyCol, haze);
     }
+    // beyond the walls, the far end of the valley is three hazy ridges one behind another (never a flat patch of sky or floor):
+    // the nearer the ridge, the darker, and the nearest is exactly the colour the far floor fades into
+    vec3 floorDark = (P_ground * 2.2 + P_rim * 0.04) * 0.9;
+    vec3 ridgeCol0 = mix(floorDark, skyCol, 0.96);
+    vec3 ridgeCol1 = mix(floorDark, skyCol, 0.92);
+    vec3 ridgeCol2 = mix(floorDark, skyCol, 0.87);
+    if (!hit) {
+        float u0 = rd.x * 3.0 + ro.x * 0.004;
+        float u1 = rd.x * 4.5 + ro.x * 0.007 + 11.0;
+        float u2 = rd.x * 6.5 + ro.x * 0.012 + 23.0;
+        float top0 = 0.075 * (0.4 + vnoise(vec2(u0, 1.0)));
+        float top1 = 0.050 * (0.4 + vnoise(vec2(u1, 2.0)));
+        float top2 = 0.026 * (0.4 + vnoise(vec2(u2, 3.0)));
+        col = mix(col, ridgeCol0, smoothstep(0.004, -0.004, rd.y - top0));
+        col = mix(col, ridgeCol1, smoothstep(0.004, -0.004, rd.y - top1));
+        col = mix(col, ridgeCol2, smoothstep(0.004, -0.004, rd.y - top2));
+    }
     // a ray that skims the far floor without landing is the dark road running to the vanishing point, not sky
     bool farFloor = false;
     if (!hit && rd.y < 0.0) {
         farFloor = true;
         // far floor the march did not reach: the same dark floor, hazed by its (flat-ground) distance, so it joins the nearer hits seamlessly
         float dist = max(tt, 0.85 / max(-rd.y, 1e-3));
-        col = mix((P_ground * 2.2 + P_rim * 0.04) * 0.9, skyCol, 1.0 - exp(-dist * 0.02));
-        // and exactly at the horizon it is the sky itself, so there is no line where the ground stops
-        col = mix(skyCol, col, smoothstep(0.0, 0.06, -rd.y));
+        col = mix(floorDark, ridgeCol2, 1.0 - exp(-dist * 0.025));
+        // and exactly at the horizon it is the nearest ridge, so there is no line where the ground stops
+        col = mix(ridgeCol2, col, smoothstep(0.0, 0.06, -rd.y));
         hit = true;
     }
     // the glow along the far crests carries on into the far floor and fades out below the horizon, so it has no edge there either
     float halo = haloAcc * ((hit && !farFloor) ? 0.0 : 1.0) * (1.0 - smoothstep(0.0, 0.06, -rd.y));
     col += P_rim * P_glow * halo * 0.75 * (1.0 + 0.6 * audio);
+    // a soft glow of light hanging in the haze right at the horizon, so the far end of the valley is lit, not a dark patch
+    col += P_rim * P_glow * 0.16 * exp(-abs(rd.y) * 16.0) * (hit && !farFloor ? 0.0 : 1.0);
     return col;
 }
 

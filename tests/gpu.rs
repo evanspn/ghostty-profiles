@@ -1536,3 +1536,81 @@ fn the_valley_runs_to_the_horizon_with_no_flat_block_at_its_far_end() {
         }
     }
 }
+
+/// Row of the sky/terrain edge in the middle of the picture, from the blue channel (the sky is the only blue thing in the hills).
+fn hills_horizon_row(out: &[u8], w: u32, h: u32) -> i32 {
+    let mut rows = Vec::new();
+    for x in (w / 2 - 4)..(w / 2 + 4) {
+        let mut found = -1;
+        for y in 0..h - 14 {
+            let terrain = (0..12).step_by(3).all(|k| out[(((y + k) * w + x) * 4) as usize + 2] < 90);
+            if terrain {
+                found = y as i32;
+                break;
+            }
+        }
+        rows.push(found);
+    }
+    rows.sort();
+    rows[rows.len() / 2]
+}
+
+/// The camera must move smoothly: over more than a minute of shader time, in every moving-camera scene, the horizon never
+/// jumps between neighbouring frames and no frame differs from the one before it by more than the picture's usual motion.
+/// (A heightfield sample for the camera, a time wrap or a level-of-detail switch all show up here as an isolated step.)
+#[test]
+fn the_hills_camera_never_jumps_over_a_minute_of_flight() {
+    let g = gpu_or_skip!();
+    let src = library().into_iter().find(|(n, _)| n.starts_with("ps3-visualizer")).expect("visualizer").1;
+    let mut values = BTreeMap::new();
+    values.insert("scene".to_string(), "1".to_string());
+    let shader = rendered(&src, &values);
+    let (w, h) = (640u32, 360u32);
+    let frame = bg_frame(w, h);
+    // 24 frames a second for 62 s; the horizon may move smoothly, so the bound is on the SECOND difference (a jump)
+    let rows: Vec<i32> =
+        (0..1488).map(|i| hills_horizon_row(&render_sized(&g, &shader, &frame, w, h, i as f32 / 24.0), w, h)).collect();
+    let mut worst = 0;
+    for i in 1..rows.len() - 1 {
+        let j = (rows[i + 1] - 2 * rows[i] + rows[i - 1]).abs();
+        if j > 3 {
+            eprintln!("jump at frame {i} (t={:.2}): {:?}", i as f32 / 24.0, &rows[i - 2..i + 3]);
+        }
+        worst = worst.max(j);
+    }
+    eprintln!("horizon rows {}..{}, largest jump {worst} px", rows.iter().min().unwrap(), rows.iter().max().unwrap());
+    assert!(rows.iter().all(|&r| r >= 0), "the terrain vanished from the middle of the view");
+    assert!(worst <= 3, "the horizon jumped by {worst} px between neighbouring frames");
+}
+
+/// No scene has a frame that differs from its neighbours far more than the scene's usual motion (a pop, a seed change, a
+/// time wrap, a level-of-detail switch): the mean frame-to-frame difference stays near its median, over 40 s of flight.
+#[test]
+fn no_scene_pops_between_frames_over_forty_seconds() {
+    let g = gpu_or_skip!();
+    let src = library().into_iter().find(|(n, _)| n.starts_with("ps3-visualizer")).expect("visualizer").1;
+    let (w, h) = (192u32, 108u32);
+    let frame = bg_frame(w, h);
+    for (i, scene) in ["hills", "valley", "water", "silk", "wash", "tunnel"].iter().enumerate() {
+        let mut values = BTreeMap::new();
+        values.insert("scene".to_string(), (i + 1).to_string());
+        let shader = rendered(&src, &values);
+        let mut prev: Option<Vec<u8>> = None;
+        let mut diffs = Vec::new();
+        for f in 0..320 {
+            let out = render_sized(&g, &shader, &frame, w, h, 5.0 + f as f32 / 8.0);
+            if let Some(p) = &prev {
+                let d: f32 =
+                    p.iter().zip(&out).map(|(a, b)| (*a as f32 - *b as f32).abs()).sum::<f32>() / out.len() as f32;
+                diffs.push(d);
+            }
+            prev = Some(out);
+        }
+        let mut sorted = diffs.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted[sorted.len() / 2];
+        let worst = *sorted.last().unwrap();
+        eprintln!("{scene}: median {median:.2}, worst {worst:.2}");
+        assert!(worst < 3.0 * median + 1.5, "{scene}: a frame pops (median {median}, worst {worst})");
+    }
+}
