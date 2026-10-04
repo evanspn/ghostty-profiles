@@ -91,6 +91,12 @@ shaders are copied in so an export is self-contained. The presets in this reposi
 image, and `.gitignore` excludes common image formats so a wallpaper cannot be committed by accident.
 `import` refuses profiles whose asset paths point outside their own folder.
 
+**A profile can only change how Ghostty looks.** Only appearance settings (colors, fonts, cursor, opacity/blur/padding,
+background image, shaders) are ever written into the active Ghostty config. `import` strips everything else
+(`command`, `initial-command`, `keybind`, `config-file`, ...) and tells you what it removed, and applying a profile
+ignores such lines even if you add them by hand. Importing someone else's profile therefore cannot make Ghostty run
+programs, rebind keys or load other files. (Shaders are code that runs on your GPU, so still only use shaders you trust.)
+
 ### Adopting your current setup
 
 `gpf adopt NAME` moves the *appearance* settings (colors, fonts, cursor, opacity, shaders, images…)

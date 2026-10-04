@@ -12,32 +12,12 @@ use anyhow::{Context, Result, bail};
 use crate::confparse;
 use crate::paths::Paths;
 use crate::presets;
-use crate::profile::{ASSET_KEYS, AssetKind, CONF_NAME, Profile, SHADER_KEY, is_contained_relative};
+use crate::profile::{ASSET_KEYS, AssetKind, CONF_NAME, Profile, SHADER_KEY, is_appearance_key, is_contained_relative};
 
 pub const INCLUDE_LINE: &str = "config-file = ?ghostty-profiles-active.conf";
 const MANAGED_COMMENT: &str = "# Managed by ghostty-profiles";
 pub const BACKUP_SUFFIX: &str = ".bak-pre-ghostty-profiles";
 
-/// Keys that describe a "look" (adopted into profiles). Keybinds, shell settings
-/// and everything else stay where they are.
-const APPEARANCE_PREFIXES: [&str; 15] = [
-    "font-",
-    "adjust-",
-    "window-padding",
-    "background",
-    "foreground",
-    "cursor-",
-    "selection-",
-    "palette",
-    "theme",
-    "custom-shader",
-    "minimum-contrast",
-    "bold-color",
-    "split-divider",
-    "unfocused-split",
-    "alpha-blending",
-];
-const APPEARANCE_EXACT: [&str; 3] = ["window-theme", "window-colorspace", "faint-opacity"];
 const LIST_KEYS: [&str; 6] = [
     "font-family",
     "font-family-bold",
@@ -46,10 +26,6 @@ const LIST_KEYS: [&str; 6] = [
     "font-feature",
     "custom-shader",
 ];
-
-pub fn is_appearance_key(key: &str) -> bool {
-    APPEARANCE_EXACT.contains(&key) || APPEARANCE_PREFIXES.iter().any(|p| key.starts_with(p))
-}
 
 fn group(key: &str) -> usize {
     if matches!(key, "background" | "foreground" | "palette" | "theme" | "minimum-contrast" | "bold-color")
@@ -193,8 +169,12 @@ impl Store {
         Ok(())
     }
 
-    /// Import a profile folder (e.g. one made by `export`). Refuses assets that point outside the folder.
-    pub fn import_profile(&self, src: &Path, name: Option<&str>) -> Result<String> {
+    /// Import a profile folder (e.g. one made by `export`).
+    ///
+    /// Refuses assets that point outside the folder, and STRIPS every setting that is not an
+    /// appearance setting (`command`, `keybind`, `config-file`, ...): a shared profile may change how
+    /// Ghostty looks, never what it runs. Returns the name and the keys that were removed.
+    pub fn import_profile(&self, src: &Path, name: Option<&str>) -> Result<(String, Vec<String>)> {
         if !src.join(CONF_NAME).is_file() {
             bail!("{} has no {CONF_NAME}", src.display());
         }
@@ -217,8 +197,13 @@ impl Store {
                 bail!("refusing to import: {k} = {v} points outside the profile folder");
             }
         }
-        copy_dir(src, &self.profiles_dir().join(&name))?;
-        Ok(name)
+        let dest = self.profiles_dir().join(&name);
+        copy_dir(src, &dest)?;
+        let mut copy = Profile::load(&dest)?;
+        let removed = copy.ignored_keys();
+        copy.lines.retain(|l| l.key().is_none_or(is_appearance_key));
+        copy.save()?;
+        Ok((name, removed))
     }
 
     // ---- presets --------------------------------------------------------------
@@ -607,8 +592,43 @@ mod tests {
             assert!(s.import_profile(&bad, None).is_err(), "{evil}");
         }
         fs::write(bad.join(CONF_NAME), "background = #000000\n").unwrap();
-        assert_eq!(s.import_profile(&bad, Some("fine")).unwrap(), "fine");
+        assert_eq!(s.import_profile(&bad, Some("fine")).unwrap().0, "fine");
         assert!(s.import_profile(&bad, Some("fine")).is_err());
+    }
+
+    #[test]
+    fn import_strips_everything_that_could_run_or_rebind_and_says_so() {
+        let sb = sandbox();
+        let s = &sb.store;
+        let shared = sb._td.path().join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(
+            shared.join(CONF_NAME),
+            "# description: nice look\nbackground = #101010\ncommand = /bin/sh -c 'open -a Calculator'\ninitial-command = whoami\nkeybind = ctrl+shift+x=text:evil\nconfig-file = /tmp/evil\nfont-size = 13\n",
+        )
+        .unwrap();
+        let (name, removed) = s.import_profile(&shared, Some("theirs")).unwrap();
+        assert_eq!(name, "theirs");
+        assert_eq!(removed, vec!["command", "config-file", "initial-command", "keybind"]);
+        let on_disk = fs::read_to_string(s.profiles_dir().join("theirs").join(CONF_NAME)).unwrap();
+        for bad in ["command", "keybind", "config-file", "evil", "Calculator"] {
+            assert!(!on_disk.contains(bad), "{bad} survived import:\n{on_disk}");
+        }
+        assert!(on_disk.contains("background = #101010") && on_disk.contains("font-size = 13"));
+        // and applying it writes none of that into the active Ghostty config either
+        s.apply("theirs").unwrap();
+        let active = fs::read_to_string(s.paths.active_conf()).unwrap();
+        for bad in ["command", "keybind", "evil"] {
+            assert!(!active.contains(bad), "{bad} reached the active conf:\n{active}");
+        }
+        // even a hand-edited profile cannot smuggle them past render
+        let mut p = s.load("theirs").unwrap();
+        p.set("keybind", "ctrl+a=text:evil");
+        p.set("command", "evil");
+        p.save().unwrap();
+        s.apply("theirs").unwrap();
+        let active = fs::read_to_string(s.paths.active_conf()).unwrap();
+        assert!(!active.contains("keybind") && !active.contains("command"), "{active}");
     }
 
     #[test]
@@ -619,7 +639,7 @@ mod tests {
         let dest = sb._td.path().join("shd-export");
         s.load("shd").unwrap().export(&dest, false, false).unwrap();
         assert!(!dest.join("images").exists());
-        assert_eq!(s.import_profile(&dest, Some("shd2")).unwrap(), "shd2");
+        assert_eq!(s.import_profile(&dest, Some("shd2")).unwrap(), ("shd2".to_string(), vec![]));
         assert_eq!(s.load("shd2").unwrap().shaders(), vec!["shaders/xmb-waves.glsl"]);
     }
 }

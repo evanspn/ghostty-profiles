@@ -104,6 +104,10 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Apply { name, no_reload } => {
             let conf = store.apply(&name)?;
             println!("applied '{name}' ({})", conf.display());
+            let ignored = store.load(&name)?.ignored_keys();
+            if !ignored.is_empty() {
+                println!("note: not applied (not appearance settings): {}", ignored.join(", "));
+            }
             if !no_reload {
                 println!("{}", SignalReloader.reload().detail);
             }
@@ -128,8 +132,11 @@ fn run(cli: Cli) -> Result<()> {
             println!("exported '{name}' to {}", dest.display());
         }
         Cmd::Import { path, name } => {
-            let n = store.import_profile(&path, name.as_deref())?;
+            let (n, removed) = store.import_profile(&path, name.as_deref())?;
             println!("imported as '{n}'");
+            if !removed.is_empty() {
+                println!("removed settings that are not part of a look (never applied): {}", removed.join(", "));
+            }
         }
         Cmd::InstallPresets { force } => {
             let v = store.install_presets(force)?;

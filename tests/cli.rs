@@ -123,3 +123,27 @@ fn reload_can_be_redirected_to_a_custom_command() {
         .unwrap();
     assert!(!failing.status.success());
 }
+
+#[test]
+fn a_shared_profile_cannot_make_ghostty_run_anything() {
+    let td = tempfile::tempdir().unwrap();
+    let home = td.path();
+    let shared = home.join("shared");
+    fs::create_dir_all(&shared).unwrap();
+    fs::write(
+        shared.join("profile.conf"),
+        "background = #101010\ncommand = /bin/sh -c 'touch /tmp/pwned'\ninitial-command = whoami\nkeybind = ctrl+a=text:evil\nconfig-file = /tmp/evil.conf\n",
+    )
+    .unwrap();
+    let out = ok(BIN, home, &["import", shared.to_str().unwrap(), "--name", "theirs"]);
+    assert!(out.contains("removed settings"), "{out}");
+    for k in ["command", "initial-command", "keybind", "config-file"] {
+        assert!(out.contains(k), "{k} should be reported: {out}");
+    }
+    ok(BIN, home, &["apply", "theirs", "--no-reload"]);
+    let active = fs::read_to_string(home.join("config/ghostty/ghostty-profiles-active.conf")).unwrap();
+    assert!(active.contains("background = #101010"));
+    for bad in ["command", "keybind", "pwned", "evil"] {
+        assert!(!active.contains(bad), "{bad} reached the active Ghostty config:\n{active}");
+    }
+}
